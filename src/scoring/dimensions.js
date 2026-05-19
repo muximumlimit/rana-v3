@@ -60,8 +60,8 @@ export function scoreSize(adCount) {
 }
 
 export function qualify(budgetScore, fitScore) {
-  if (budgetScore >= 60 && fitScore >= 50) return 'Qualified';
-  if (budgetScore >= 40) return 'Backlog';
+  if (budgetScore >= 60 && fitScore >= 50) return 'Discovered';
+  if (budgetScore >= 40) return 'BacklogV3';
   return 'Dropped';
 }
 

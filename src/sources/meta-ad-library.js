@@ -78,7 +78,8 @@ export async function runSource(targets, runState) {
       const existing = await findExisting(advertiser);
       if (existing) {
         // Enrich existing row with ad data — don't change status if already active
-        const safeStatuses = ['Contacted', 'Engaged', 'Meeting Pending', 'Converted'];
+        // Don't downgrade leads that are already in the outbound pipeline
+        const safeStatuses = ['Qualified', 'Backlog', 'Contacted', 'Engaged', 'Meeting Pending', 'Converted'];
         const enrichFields = {
           running_ads:      true,
           ad_count:         advertiser.ad_count ?? null,
