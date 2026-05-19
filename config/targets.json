@@ -1,0 +1,19 @@
+{
+  "country": "IQ",
+  "search_terms": [
+    "بغداد",
+    "Baghdad",
+    "مطعم بغداد",
+    "كافيه بغداد",
+    "عيادة",
+    "صالون",
+    "boutique",
+    "fashion Baghdad",
+    "restaurant Baghdad",
+    "clinic Baghdad",
+    "jewelry Baghdad",
+    "pharmacy Baghdad"
+  ],
+  "max_advertisers_per_run": 200,
+  "min_active_ads": 1
+}
