@@ -5,14 +5,17 @@
     "Baghdad",
     "مطعم بغداد",
     "كافيه بغداد",
-    "عيادة",
-    "صالون",
-    "boutique",
-    "fashion Baghdad",
     "restaurant Baghdad",
-    "clinic Baghdad",
+    "fashion Baghdad",
+    "boutique Baghdad",
     "jewelry Baghdad",
-    "pharmacy Baghdad"
+    "hotel Baghdad",
+    "مصنع بغداد",
+    "سيارات بغداد",
+    "معرض سيارات",
+    "مواد غذائية بغداد",
+    "توزيع بغداد",
+    "علامة تجارية بغداد"
   ],
   "max_advertisers_per_run": 200,
   "min_active_ads": 1
