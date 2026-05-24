@@ -24,6 +24,8 @@ export async function startRun() {
     leads_new: 0,
     leads_enriched: 0,
     dropped: 0,
+    dropped_hard_block: 0,
+    dropped_activity_gate: 0,
     total_cost_usd: 0,
     firecrawl_errors: 0,
     firecrawl_failed: false,
@@ -53,11 +55,13 @@ async function executePipeline(runId, runState) {
 
     const result = await runMetaAdLibrary(targets, runState);
 
-    runState.leads_new = result.new_leads;
-    runState.leads_enriched = result.enriched_leads;
-    runState.dropped = result.dropped;
-    runState.total_cost_usd = result.total_cost_usd;
-    runState.firecrawl_failed = result.firecrawl_failed;
+    runState.leads_new            = result.new_leads;
+    runState.leads_enriched       = result.enriched_leads;
+    runState.dropped              = result.dropped;
+    runState.dropped_hard_block   = result.dropped_hard_block;
+    runState.dropped_activity_gate = result.dropped_activity_gate;
+    runState.total_cost_usd       = result.total_cost_usd;
+    runState.firecrawl_failed     = result.firecrawl_failed;
     runState.status = 'completed';
     runState.finished_at = new Date().toISOString();
 

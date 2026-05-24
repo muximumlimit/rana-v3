@@ -16,6 +16,8 @@ export async function runSource(targets, runState) {
   let totalNew = 0;
   let totalEnriched = 0;
   let totalDropped = 0;
+  let totalDroppedHardBlock = 0;
+  let totalDroppedActivityGate = 0;
   let totalCostUsd = 0;
   let firecrawlFailed = false;
 
@@ -64,6 +66,7 @@ export async function runSource(targets, runState) {
       // Gate 1: ICP hard block — medical, dental, beauty, salon, pharmacy
       if (isHardBlocked(advertiser, searchTerm)) {
         logger.debug({ name: advertiser.name }, 'dropped: hard block (off-ICP sector)');
+        totalDroppedHardBlock++;
         totalDropped++;
         continue;
       }
@@ -72,6 +75,7 @@ export async function runSource(targets, runState) {
       // Signals "invested in marketing," not a one-off boost post
       if ((advertiser.ad_count ?? 0) < ACTIVITY_MIN_ADS) {
         logger.debug({ name: advertiser.name, ad_count: advertiser.ad_count }, 'dropped: activity gate (ad_count < 5)');
+        totalDroppedActivityGate++;
         totalDropped++;
         continue;
       }
@@ -156,12 +160,16 @@ export async function runSource(targets, runState) {
   }
 
   runState.firecrawl_failed = firecrawlFailed;
+  runState.dropped_hard_block    = totalDroppedHardBlock;
+  runState.dropped_activity_gate = totalDroppedActivityGate;
 
   return {
-    new_leads:        totalNew,
-    enriched_leads:   totalEnriched,
-    dropped:          totalDropped,
-    total_cost_usd:   totalCostUsd,
-    firecrawl_failed: firecrawlFailed,
+    new_leads:              totalNew,
+    enriched_leads:         totalEnriched,
+    dropped:                totalDropped,
+    dropped_hard_block:     totalDroppedHardBlock,
+    dropped_activity_gate:  totalDroppedActivityGate,
+    total_cost_usd:         totalCostUsd,
+    firecrawl_failed:       firecrawlFailed,
   };
 }
