@@ -27,6 +27,9 @@ export async function findExisting(advertiser) {
   if (advertiser.facebook_page_id) {
     conditions.push(`facebook_page_id.eq.${advertiser.facebook_page_id}`);
   }
+  if (advertiser.facebook_page_url) {
+    conditions.push(`facebook_page_url.eq.${advertiser.facebook_page_url}`);
+  }
 
   const { data, error } = await supabase
     .from('leads')

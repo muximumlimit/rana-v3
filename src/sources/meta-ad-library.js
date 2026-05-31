@@ -99,7 +99,7 @@ export async function runSource(targets, runState) {
       // Dedup against existing leads
       const existing = await findExisting(advertiser);
       if (existing) {
-        const safeStatuses = ['Qualified', 'Backlog', 'Contacted', 'Engaged', 'Meeting Pending', 'Converted'];
+        const safeStatuses = ['Qualified', 'Backlog', 'BacklogV3', 'Unreachable', 'Stale', 'Contacted', 'Engaged', 'Meeting Pending', 'Converted'];
         const enrichFields = {
           running_ads:       true,
           ad_count:          advertiser.ad_count ?? null,
