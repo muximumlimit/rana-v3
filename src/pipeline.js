@@ -15,6 +15,20 @@ async function loadTargets() {
   return targetsCache;
 }
 
+// Rotate a batch of terms per night so we don't re-scrape the same ~200 advertisers
+// every run (the saturation that produced new=0). A window of TERMS_PER_NIGHT slides
+// through the full list keyed on the UTC day-of-month, wrapping around — so each night
+// surfaces different advertisers and Firecrawl/Claude cost stays flat (~15 terms/run).
+function rotateTerms(allTerms, perNight) {
+  const n = Math.min(perNight, allTerms.length);
+  if (n >= allTerms.length) return allTerms;
+  const day = new Date().getUTCDate(); // 1..31
+  const start = ((day - 1) * n) % allTerms.length;
+  const batch = [];
+  for (let i = 0; i < n; i++) batch.push(allTerms[(start + i) % allTerms.length]);
+  return batch;
+}
+
 export async function startRun() {
   const runId = `run_${Date.now()}`;
   const runState = {
@@ -53,7 +67,14 @@ async function executePipeline(runId, runState) {
   try {
     const targets = await loadTargets();
 
-    const result = await runMetaAdLibrary(targets, runState);
+    // Batch a rotating subset per night (env-tunable, no deploy needed to retune).
+    const perNight = parseInt(process.env.TERMS_PER_NIGHT, 10) || targets.terms_per_night || 15;
+    const search_terms = rotateTerms(targets.search_terms, perNight);
+    runState.terms_run = search_terms.length;
+    runState.terms_total = targets.search_terms.length;
+    logger.info({ runId, terms_run: search_terms.length, terms_total: targets.search_terms.length, terms: search_terms }, 'rotated term batch for tonight');
+
+    const result = await runMetaAdLibrary({ ...targets, search_terms }, runState);
 
     runState.leads_new            = result.new_leads;
     runState.leads_enriched       = result.enriched_leads;
