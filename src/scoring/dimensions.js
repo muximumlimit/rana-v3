@@ -29,15 +29,38 @@ const HARD_BLOCK = [
 
 const PREMIUM_HINTS = ['luxury', 'premium', 'elite', 'vip', 'royal', 'فاخر', 'راقي', 'رويال'];
 
+// Normalize Arabic orthographic variants so block terms match real-world spellings:
+// أسنان (U+0623 alef-hamza) must match the common اسنان (U+0627 plain alef).
+function normalizeArabic(s) {
+  return s
+    .replace(/[أإآٱ]/g, 'ا') // أ إ آ ٱ -> ا
+    .replace(/ى/g, 'ي')                     // ى -> ي
+    .replace(/ة/g, 'ه');                    // ة -> ه
+}
+
+// Whole-word tokens across Latin + Arabic (split on any non-letter). Word-boundary
+// matching so 'spa' no longer substring-hits 'spaghetti'/'Spazio' and 'salon' no
+// longer hits 'Salontex'. Block-list CONTENTS are untouched — matching logic only.
+function tokenSet(s) {
+  const toks = normalizeArabic(s.toLowerCase()).match(/\p{L}+/gu) || [];
+  return new Set(toks);
+}
+
+const HARD_BLOCK_TOKENS = new Set(HARD_BLOCK.map(t => normalizeArabic(t.toLowerCase())));
+
 export function isHardBlocked(advertiser, searchTerm) {
-  const combined = [
+  const text = [
     advertiser.name ?? '',
     (advertiser.categories ?? []).join(' '),
     (advertiser.creative_snippets ?? []).join(' '),
     searchTerm ?? '',
-  ].join(' ').toLowerCase();
+  ].join(' ');
 
-  return HARD_BLOCK.some(term => combined.includes(term));
+  const tokens = tokenSet(text);
+  for (const blocked of HARD_BLOCK_TOKENS) {
+    if (tokens.has(blocked)) return true;
+  }
+  return false;
 }
 
 export function scoreBudget(advertiser) {
