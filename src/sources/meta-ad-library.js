@@ -9,7 +9,9 @@ import logger from '../util/logger.js';
 // Activity gate v1 proxy: minimum simultaneous active ads to qualify as
 // "invested in marketing." Per-ad recency check (start_date) added in
 // Session B when parser is extended to return individual ad dates.
-const ACTIVITY_MIN_ADS = 5;
+// Env-tunable so threshold changes need no deploy; default 3 (was hardcoded 5,
+// which dropped ~82% of discoveries).
+const ACTIVITY_MIN_ADS = parseInt(process.env.ACTIVITY_MIN_ADS, 10) || 3;
 
 export async function runSource(targets, runState) {
   const seen = new Set();
@@ -71,10 +73,10 @@ export async function runSource(targets, runState) {
         continue;
       }
 
-      // Gate 2: Activity proxy — must have ≥5 active ads
+      // Gate 2: Activity proxy — must have >= ACTIVITY_MIN_ADS active ads
       // Signals "invested in marketing," not a one-off boost post
       if ((advertiser.ad_count ?? 0) < ACTIVITY_MIN_ADS) {
-        logger.debug({ name: advertiser.name, ad_count: advertiser.ad_count }, 'dropped: activity gate (ad_count < 5)');
+        logger.debug({ name: advertiser.name, ad_count: advertiser.ad_count, min: ACTIVITY_MIN_ADS }, 'dropped: activity gate');
         totalDroppedActivityGate++;
         totalDropped++;
         continue;
@@ -99,7 +101,6 @@ export async function runSource(targets, runState) {
       // Dedup against existing leads
       const existing = await findExisting(advertiser);
       if (existing) {
-        const safeStatuses = ['Qualified', 'Backlog', 'BacklogV3', 'Unreachable', 'Stale', 'Contacted', 'Engaged', 'Meeting Pending', 'Converted'];
         const enrichFields = {
           running_ads:       true,
           ad_count:          advertiser.ad_count ?? null,
@@ -112,7 +113,14 @@ export async function runSource(targets, runState) {
           primary_hook:      'running_ads',
           enriched_at:       new Date().toISOString(),
         };
-        if (!safeStatuses.includes(existing.status)) {
+        // Resurrection guard: ONLY a still-raw 'Discovered' lead may have its status
+        // rewritten by re-discovery. Every other status is protected — terminal states
+        // (Dropped, Blacklisted, Duplicate, Closed, Unreachable, Stale) must never be
+        // resurrected, and human-progress states (Replied, Hot Lead, Meeting Pending,
+        // Awaiting Human, Contacted, Engaged) must never be clobbered back to Discovered.
+        // This matters now that the activity gate (5->3) lets more advertisers reach dedup.
+        // (Extends ee524fb's terminal-status protection.) Other fields still enrich.
+        if (existing.status === 'Discovered') {
           enrichFields.status = status;
         }
 

@@ -17,6 +17,5 @@
     "توزيع بغداد",
     "علامة تجارية بغداد"
   ],
-  "max_advertisers_per_run": 200,
-  "min_active_ads": 1
+  "max_advertisers_per_run": 200
 }
