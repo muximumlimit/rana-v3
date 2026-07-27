@@ -18,6 +18,18 @@ For each advertiser, return:
 
 Return ONLY valid JSON. No prose. If no advertisers found, return [].`;
 
+// Firecrawl markdown can contain lone/unpaired UTF-16 surrogates (broken emoji,
+// truncated multi-byte chars in Arabic ad creative). JSON.stringify emits these
+// as bare \uD8xx, which Anthropic's server-side JSON parser rejects with a 400
+// "no low surrogate in string". Strip any surrogate code unit that isn't part of
+// a valid high+low pair before sending.
+function stripLoneSurrogates(str) {
+  return str.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '',
+  );
+}
+
 export async function parseAdLibraryContent(markdown, html) {
   const content = markdown || html || '';
   if (!content || content.length < 100) {
@@ -25,8 +37,8 @@ export async function parseAdLibraryContent(markdown, html) {
     return { advertisers: [], input_tokens: 0, output_tokens: 0 };
   }
 
-  // Trim to 80k chars to stay within token budget
-  const trimmed = content.slice(0, 80000);
+  // Trim to 80k chars to stay within token budget, then strip lone surrogates.
+  const trimmed = stripLoneSurrogates(content.slice(0, 80000));
 
   const msg = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
