@@ -131,7 +131,12 @@ export async function runSource(targets, runState) {
           ad_count:          advertiser.ad_count ?? null,
           facebook_page_id:  advertiser.facebook_page_id ?? existing.facebook_page_id,
           facebook_page_url: advertiser.facebook_page_url ?? null,
-          discovery_source:  'ad_library',
+          // discovery_source is NOT overwritten on enrich — it records how a lead
+          // was FOUND. Clobbering it rewrote rana-v2 google_maps leads as
+          // ad_library on re-discovery, so every attribution query by
+          // discovery_source silently lied. That corruption made an audit of the
+          // Apify source appear to show 6 breaches of its never-write-phone_e164
+          // guarantee when it had written none. Fixed there in 13e2ba6.
           budget_score:      budgetScore,
           fit_score:         fitScore,
           size_score:        sizeScore,

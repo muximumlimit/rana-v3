@@ -214,8 +214,9 @@ export async function runSource(targets, runState) {
     ctwa_advertisers: 0, whapi_checked: 0, whapi_valid: 0, leads_new: 0, leads_enriched: 0,
     apify_cost_usd: 0, month_to_date_usd: 0, projected_month_usd: 0, halt_reason: null,
   };
-  // not a column — carried in metadata jsonb so no migration is needed
+  // not columns — carried in metadata jsonb so no migration is needed
   m.dropped_activity_gate = 0;
+  m.icp_blocked_on_stored_sector = 0;
 
   // --- budget guard, BEFORE spending anything -------------------------------
   const mtd = await monthToDateUsd();
@@ -368,6 +369,17 @@ export async function runSource(targets, runState) {
 
     try {
       const existing = await findExisting({ name: a.name, facebook_page_id: a.facebook_page_id });
+
+      // Second ICP gate, on the lead's STORED sector. The probe above only sees
+      // what we scraped, so a lead already classified into a blocked sector could
+      // still be enriched — reusing isHardBlocked on the sector string works
+      // because 'beauty_clinic' tokenises to ['beauty','clinic'], both blocked.
+      if (existing?.sector && isHardBlocked({ name: existing.sector, categories: [], creative_snippets: [] }, '')) {
+        m.icp_blocked_on_stored_sector++;
+        logger.info({ id: existing.id, sector: existing.sector, name: a.name }, 'existing lead is in a blocked sector — not enriched');
+        continue;
+      }
+
       if (existing) {
         const fields = {
           running_ads: true, ad_count: a.ad_count_proxy,
@@ -419,6 +431,7 @@ export async function runSource(targets, runState) {
   m.status = 'success';
   m.metadata = {
     dropped_activity_gate: m.dropped_activity_gate,
+    icp_blocked_on_stored_sector: m.icp_blocked_on_stored_sector,
     activity_min_ads: ACTIVITY_MIN_ADS,
     phones_seen_all_advertisers: allPhonesSeen.length,
     phones_on_kept_advertisers: allPhones.length,
@@ -437,7 +450,9 @@ export async function runSource(targets, runState) {
 async function persist(supabase, m) {
   try {
     const row = { ...m, finished_at: new Date().toISOString() };
-    delete row.dropped_activity_gate; // lives in metadata, not a column
+    // these live in metadata, not as columns
+    delete row.dropped_activity_gate;
+    delete row.icp_blocked_on_stored_sector;
     const { error } = await supabase.from('rana_v3_runs').insert([row]);
     if (error) logger.error({ err: error.message }, 'rana_v3_runs insert failed');
   } catch (e) {

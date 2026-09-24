@@ -98,6 +98,19 @@ test('INTENT: a clinic whose NAME looks clean is still blocked on its ad copy', 
     'body text is passed into the block probe precisely so this case is caught');
 });
 
+test('INTENT: the block also fires on a lead\'s STORED sector, so an enrich cannot refresh a blocked row', () => {
+  // findExisting() now selects `sector`; the guard reuses isHardBlocked on that
+  // string, which works because 'beauty_clinic' tokenises to ['beauty','clinic'].
+  const onSector = s => isHardBlocked({ name: s, categories: [], creative_snippets: [] }, '');
+  for (const s of ['beauty_clinic', 'medical_clinic', 'dental_clinic', 'pharmacy', 'salon_spa']) {
+    assert.equal(onSector(s), true, `stored sector ${s} must block an enrich`);
+  }
+  for (const s of ['hotel', 'automotive_showroom', 'packaged_fmcg', 'manufacturer', 'b2b_services',
+                   'premium_restaurant', 'cafe', 'fashion_retail', 'jewelry', 'real_estate']) {
+    assert.equal(onSector(s), false, `ICP sector ${s} must NOT be blocked`);
+  }
+});
+
 test('a legitimate ICP advertiser is not blocked', () => {
   for (const name of ['شركة الشهير للصناعات الغذائية', 'حسين الكعبي للجملة', 'مفروشات لوڤا', 'Brands Oil - براندس اويل']) {
     assert.equal(isHardBlocked({ name, categories: [], creative_snippets: [] }, ''), false, name);

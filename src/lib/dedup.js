@@ -31,9 +31,13 @@ export async function findExisting(advertiser) {
     conditions.push(`facebook_page_url.eq.${advertiser.facebook_page_url}`);
   }
 
+  // `sector` is selected so callers can apply the ICP hard block to a lead's
+  // STORED sector, not just to the advertiser text we scraped. Without it an
+  // enrich could refresh a blocked-sector row (e.g. a lead already classified
+  // beauty_clinic) because the block only ever saw the freshly scraped name.
   const { data, error } = await supabase
     .from('leads')
-    .select('id, business_name, status, source, facebook_page_id, normalized_name')
+    .select('id, business_name, status, source, facebook_page_id, normalized_name, sector')
     .or(conditions.join(','))
     .limit(1)
     .maybeSingle();
