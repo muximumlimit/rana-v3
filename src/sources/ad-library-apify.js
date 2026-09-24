@@ -23,7 +23,16 @@ import logger from '../util/logger.js';
 
 const ACTOR = 'curious_coder~facebook-ads-library-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
-const ACTIVITY_MIN_ADS = parseInt(process.env.ACTIVITY_MIN_ADS, 10) || 3;
+// The Firecrawl source uses ACTIVITY_MIN_ADS=3 because Haiku reads the "N ads use
+// this creative" count off the rendered page. The Apify actor gives no per-advertiser
+// total: `ads_count` is always 1 (it is per-ad), and `total` is the search-wide
+// result count (594 on every row). With maxItems=30/term spread over ~8-10
+// advertisers we only sample 1-2 ads each, so a >=3 gate filters on a sampling
+// artifact — it discarded 93% of advertisers (84 -> 6) on the first live run.
+// Default 1 here: the Ad Library query is already active_status=active, so presence
+// alone proves the advertiser is spending right now. Quality still gates downstream
+// in qualify(), which needs budget>=60 AND fit>=50.
+const ACTIVITY_MIN_ADS = parseInt(process.env.APIFY_ACTIVITY_MIN_ADS, 10) || 1;
 
 // Apify list pricing for this actor, confirmed from its pricingInfos 2026-09-24.
 // `usageTotalUsd` on a run does NOT include per-event dataset charges, so budget
@@ -205,6 +214,8 @@ export async function runSource(targets, runState) {
     ctwa_advertisers: 0, whapi_checked: 0, whapi_valid: 0, leads_new: 0, leads_enriched: 0,
     apify_cost_usd: 0, month_to_date_usd: 0, projected_month_usd: 0, halt_reason: null,
   };
+  // not a column — carried in metadata jsonb so no migration is needed
+  m.dropped_activity_gate = 0;
 
   // --- budget guard, BEFORE spending anything -------------------------------
   const mtd = await monthToDateUsd();
@@ -259,6 +270,7 @@ export async function runSource(targets, runState) {
         facebook_page_url: it.snapshot?.page_profile_uri ?? null,
         categories: it.snapshot?.page_categories ?? [],
         ad_count: 0,
+        collation_max: 0,
         creative_snippets: [],
         bodies: [],
         phones: new Set(),
@@ -268,6 +280,9 @@ export async function runSource(targets, runState) {
     }
     const a = byAdvertiser.get(key);
     a.ad_count++;
+    // collation_count = how many ads share this creative. Combined with the number
+    // of distinct ads we sampled it is the best available repeat-spend proxy.
+    if (Number.isFinite(it.collation_count)) a.collation_max = Math.max(a.collation_max, it.collation_count);
     // cta_type is the authoritative CTWA signal. Do NOT infer it from the word
     // "WhatsApp" appearing on the page — that is usually publisher_platform, i.e.
     // where the ad was SHOWN, which is a different thing and ~2x more common.
@@ -282,10 +297,37 @@ export async function runSource(targets, runState) {
   }
   m.advertisers = byAdvertiser.size;
 
-  // --- new-number rate ------------------------------------------------------
-  const allPhones = [...new Set([...byAdvertiser.values()].flatMap(a => [...a.phones]))];
+  // --- gate FIRST, then measure phones on what survives ---------------------
+  // Order matters: gating first means we never spend Whapi checks on advertisers
+  // we are about to discard, and the reported rates describe leads we actually keep.
+  const kept = [];
+  for (const a of byAdvertiser.values()) {
+    if (!a.name) continue;
+
+    // ICP hard block at WRITE time. Body text is in the probe so a clinic that
+    // only reveals itself in its ad copy is still caught — a cosmetic clinic must
+    // never get a row, phone or not.
+    const probe = { name: a.name, categories: a.categories, creative_snippets: [...a.creative_snippets, ...a.bodies] };
+    if (isHardBlocked(probe, '')) {
+      m.icp_blocked++;
+      logger.info({ name: a.name }, 'ICP hard block — no row written');
+      continue;
+    }
+    m.icp_allowed++;
+
+    // measured across every ICP-allowed advertiser, before any activity gate
+    if (a.is_whatsapp_cta) m.ctwa_advertisers++;
+
+    a.ad_count_proxy = Math.max(a.ad_count, a.collation_max);
+    if (a.ad_count_proxy < ACTIVITY_MIN_ADS) { m.dropped_activity_gate++; continue; }
+
+    kept.push(a);
+  }
+
+  const allPhonesSeen = [...new Set([...byAdvertiser.values()].flatMap(a => [...a.phones]))];
+  const allPhones = [...new Set(kept.flatMap(a => [...a.phones]))];
   m.phones_found = allPhones.length;
-  m.advertisers_with_phone = [...byAdvertiser.values()].filter(a => a.phones.size).length;
+  m.advertisers_with_phone = kept.filter(a => a.phones.size).length;
 
   const knownKeys = new Set();
   for (let from = 0; ; from += 1000) {
@@ -308,31 +350,15 @@ export async function runSource(targets, runState) {
   m.whapi_valid = valid.size;
 
   // --- write ----------------------------------------------------------------
-  for (const a of byAdvertiser.values()) {
-    if (!a.name) continue;
-
-    // ICP hard block at WRITE time. Body text is included so a clinic that only
-    // reveals itself in its ad copy is still caught — a cosmetic clinic must
-    // never get a row, phone or not.
-    const probe = { name: a.name, categories: a.categories, creative_snippets: [...a.creative_snippets, ...a.bodies] };
-    if (isHardBlocked(probe, '')) {
-      m.icp_blocked++;
-      logger.info({ name: a.name }, 'ICP hard block — no row written');
-      continue;
-    }
-    m.icp_allowed++;
-
-    if (a.ad_count < ACTIVITY_MIN_ADS) continue;
-    if (a.is_whatsapp_cta) m.ctwa_advertisers++;
-
+  for (const a of kept) {
     const advertiser = {
       name: a.name, categories: a.categories, creative_snippets: a.creative_snippets,
-      ad_count: a.ad_count, ad_start_date: a.ad_start_date,
+      ad_count: a.ad_count_proxy, ad_start_date: a.ad_start_date,
       facebook_page_id: a.facebook_page_id, facebook_page_url: a.facebook_page_url,
     };
     const budgetScore = scoreBudget(advertiser);
     const fitScore    = scoreFit(advertiser, '');
-    const sizeScore   = scoreSize(a.ad_count);
+    const sizeScore   = scoreSize(a.ad_count_proxy);
     const status      = qualify(budgetScore, fitScore);
     if (status === 'Dropped') continue;
 
@@ -344,7 +370,7 @@ export async function runSource(targets, runState) {
       const existing = await findExisting({ name: a.name, facebook_page_id: a.facebook_page_id });
       if (existing) {
         const fields = {
-          running_ads: true, ad_count: a.ad_count,
+          running_ads: true, ad_count: a.ad_count_proxy,
           facebook_page_id: a.facebook_page_id ?? existing.facebook_page_id,
           facebook_page_url: a.facebook_page_url ?? null,
           discovery_source: 'ad_library_apify',
@@ -369,7 +395,7 @@ export async function runSource(targets, runState) {
           status,
           running_ads: true,
           whatsapp_cta: a.is_whatsapp_cta ? true : null,
-          ad_count: a.ad_count,
+          ad_count: a.ad_count_proxy,
           ad_creative_urls: a.creative_snippets.map(s => String(s).slice(0, 500)),
           ad_start_date: a.ad_start_date,
           facebook_page_id: a.facebook_page_id,
@@ -386,6 +412,15 @@ export async function runSource(targets, runState) {
   }
 
   m.status = 'success';
+  m.metadata = {
+    dropped_activity_gate: m.dropped_activity_gate,
+    activity_min_ads: ACTIVITY_MIN_ADS,
+    phones_seen_all_advertisers: allPhonesSeen.length,
+    phones_on_kept_advertisers: allPhones.length,
+    advertisers_kept: kept.length,
+    whapi_valid_share: m.whapi_checked ? Number((m.whapi_valid / m.whapi_checked).toFixed(4)) : null,
+    icp_allowed_share: m.advertisers ? Number((m.icp_allowed / m.advertisers).toFixed(4)) : null,
+  };
   await persist(supabase, m);
 
   runState.whatsapp_cta_count = m.ctwa_advertisers;
@@ -396,7 +431,9 @@ export async function runSource(targets, runState) {
 
 async function persist(supabase, m) {
   try {
-    const { error } = await supabase.from('rana_v3_runs').insert([{ ...m, finished_at: new Date().toISOString() }]);
+    const row = { ...m, finished_at: new Date().toISOString() };
+    delete row.dropped_activity_gate; // lives in metadata, not a column
+    const { error } = await supabase.from('rana_v3_runs').insert([row]);
     if (error) logger.error({ err: error.message }, 'rana_v3_runs insert failed');
   } catch (e) {
     logger.error({ err: e.message }, 'rana_v3_runs insert threw');
@@ -407,9 +444,9 @@ function toResult(m) {
   return {
     new_leads: m.leads_new,
     enriched_leads: m.leads_enriched,
-    dropped: m.icp_blocked,
+    dropped: m.icp_blocked + (m.dropped_activity_gate || 0),
     dropped_hard_block: m.icp_blocked,
-    dropped_activity_gate: 0,
+    dropped_activity_gate: m.dropped_activity_gate || 0,
     whatsapp_cta_count: m.ctwa_advertisers,
     new_number_rate: m.new_rate,
     phones_found: m.phones_found,
