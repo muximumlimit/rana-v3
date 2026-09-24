@@ -1,6 +1,7 @@
 import { createReadStream } from 'fs';
 import { readFile } from 'fs/promises';
 import { runSource as runMetaAdLibrary } from './sources/meta-ad-library.js';
+import { runSource as runAdLibraryApify } from './sources/ad-library-apify.js';
 import logger from './util/logger.js';
 
 // In-memory run tracking
@@ -75,7 +76,16 @@ async function executePipeline(runId, runState) {
     runState.terms_total = targets.search_terms.length;
     logger.info({ runId, terms_run: search_terms.length, terms_total: targets.search_terms.length, terms: search_terms }, 'rotated term batch for tonight');
 
-    const result = await runMetaAdLibrary({ ...targets, search_terms }, runState);
+    // AD_LIBRARY_SOURCE picks the implementation. Default stays 'firecrawl' so
+    // nothing changes until the flag is set; the Firecrawl + Haiku path is kept as
+    // the fallback because the Apify actor is a third-party dependency that can
+    // change its output shape without notice.
+    const sourceName = (process.env.AD_LIBRARY_SOURCE || 'firecrawl').toLowerCase();
+    const runFn = sourceName === 'apify' ? runAdLibraryApify : runMetaAdLibrary;
+    runState.ad_library_source = sourceName;
+    logger.info({ runId, sourceName }, 'ad library source selected');
+
+    const result = await runFn({ ...targets, search_terms }, runState);
 
     runState.leads_new            = result.new_leads;
     runState.leads_enriched       = result.enriched_leads;
@@ -83,6 +93,12 @@ async function executePipeline(runId, runState) {
     runState.dropped_hard_block   = result.dropped_hard_block;
     runState.dropped_activity_gate = result.dropped_activity_gate;
     runState.whatsapp_cta_count    = result.whatsapp_cta_count ?? 0;
+    runState.new_number_rate       = result.new_number_rate ?? null;
+    runState.phones_found          = result.phones_found ?? 0;
+    runState.phones_new            = result.phones_new ?? 0;
+    runState.whapi_valid           = result.whapi_valid ?? 0;
+    runState.halted                = result.halted ?? false;
+    runState.halt_reason           = result.halt_reason ?? null;
     runState.total_cost_usd       = result.total_cost_usd;
     runState.firecrawl_failed     = result.firecrawl_failed;
     runState.status = 'completed';
