@@ -373,7 +373,12 @@ export async function runSource(targets, runState) {
           running_ads: true, ad_count: a.ad_count_proxy,
           facebook_page_id: a.facebook_page_id ?? existing.facebook_page_id,
           facebook_page_url: a.facebook_page_url ?? null,
-          discovery_source: 'ad_library_apify',
+          // discovery_source is deliberately NOT overwritten on enrich. It records
+          // how a lead was FOUND, and clobbering it destroys provenance: a rana-v2
+          // google_maps lead re-seen in the Ad Library would start reading as
+          // ad_library_apify. That corruption already made an audit of this source
+          // look like it had written phone_e164 six times when it had written none.
+          // (The Firecrawl source in meta-ad-library.js still has this bug.)
           budget_score: budgetScore, fit_score: fitScore, size_score: sizeScore,
           primary_hook: 'running_ads', enriched_at: new Date().toISOString(),
         };
