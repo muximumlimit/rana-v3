@@ -13,6 +13,23 @@ import logger from '../util/logger.js';
 // which dropped ~82% of discoveries).
 const ACTIVITY_MIN_ADS = parseInt(process.env.ACTIVITY_MIN_ADS, 10) || 3;
 
+// Iraqi advertisers routinely publish their mobile in the ad copy. Measured
+// 2026-09-24 on an 11-ad Apify sample: 9 of 11 (82%) carried a reachable number in
+// the body text — a better hit rate than Google Places gives for factories (57.7%).
+// Accepts 07XXXXXXXXX / 7XXXXXXXXX / 9647XXXXXXXXX shapes and returns the first
+// plausible one, digits only. Deliberately conservative: anything it is unsure
+// about is dropped rather than guessed.
+function firstPhone(list) {
+  if (!Array.isArray(list)) return null;
+  for (const raw of list) {
+    const d = String(raw ?? '').replace(/\D/g, '');
+    if (/^9647\d{8,9}$/.test(d)) return d;
+    if (/^07\d{9}$/.test(d))     return '964' + d.slice(1);
+    if (/^7\d{9}$/.test(d))      return '964' + d;
+  }
+  return null;
+}
+
 export async function runSource(targets, runState) {
   const seen = new Set();
   let totalNew = 0;
@@ -21,6 +38,7 @@ export async function runSource(targets, runState) {
   let totalDroppedHardBlock = 0;
   let totalDroppedActivityGate = 0;
   let totalCostUsd = 0;
+  let totalCtwa = 0;
   let firecrawlFailed = false;
 
   for (const searchTerm of targets.search_terms) {
@@ -99,6 +117,13 @@ export async function runSource(targets, runState) {
       }
 
       // Dedup against existing leads
+      // Click-to-WhatsApp: the advertiser already sells over the channel Lara uses.
+      // Accumulating signal — once observed true it must never be erased by a later
+      // ad set that happens to carry no WhatsApp CTA, so `false`/absent never
+      // downgrades an existing true.
+      const ctwa = advertiser.is_whatsapp_cta === true ? true : null;
+      if (ctwa) totalCtwa++;
+
       const existing = await findExisting(advertiser);
       if (existing) {
         const enrichFields = {
@@ -113,6 +138,7 @@ export async function runSource(targets, runState) {
           primary_hook:      'running_ads',
           enriched_at:       new Date().toISOString(),
         };
+        if (ctwa) enrichFields.whatsapp_cta = true;
         // Resurrection guard: ONLY a still-raw 'Discovered' lead may have its status
         // rewritten by re-discovery. Every other status is protected — terminal states
         // (Dropped, Blacklisted, Duplicate, Closed, Unreachable, Stale) must never be
@@ -148,6 +174,13 @@ export async function runSource(targets, runState) {
         ad_creative_urls:  (advertiser.creative_snippets ?? []).map(s => String(s).slice(0, 500)),
         facebook_page_id:  advertiser.facebook_page_id ?? null,
         facebook_page_url: advertiser.facebook_page_url ?? null,
+        whatsapp_cta:      ctwa,
+        // Phones published in the advertiser's own ad copy. Captured as the RAW
+        // `phone` only — `phone_e164` is deliberately left null, because lara-v2's
+        // pool query gates on `phone_e164 IS NOT NULL` (crm.js:110). So these are
+        // banked for review and cannot reach the blast path until someone validates
+        // them (Whapi) and promotes them deliberately.
+        phone:             firstPhone(advertiser.contact_phones),
         budget_score:      budgetScore,
         fit_score:         fitScore,
         size_score:        sizeScore,
@@ -170,6 +203,7 @@ export async function runSource(targets, runState) {
   runState.firecrawl_failed = firecrawlFailed;
   runState.dropped_hard_block    = totalDroppedHardBlock;
   runState.dropped_activity_gate = totalDroppedActivityGate;
+  runState.whatsapp_cta_count    = totalCtwa;
 
   return {
     new_leads:              totalNew,
@@ -177,6 +211,7 @@ export async function runSource(targets, runState) {
     dropped:                totalDropped,
     dropped_hard_block:     totalDroppedHardBlock,
     dropped_activity_gate:  totalDroppedActivityGate,
+    whatsapp_cta_count:     totalCtwa,
     total_cost_usd:         totalCostUsd,
     firecrawl_failed:       firecrawlFailed,
   };

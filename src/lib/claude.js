@@ -15,6 +15,21 @@ For each advertiser, return:
 - ad_count: number of active ads
 - categories: any business category labels
 - creative_snippets: first 100 chars of each ad's text, max 3
+- is_whatsapp_cta: true ONLY if the ad's call-to-action BUTTON sends the user to
+  WhatsApp — i.e. the button itself reads "Send WhatsApp message" / "WhatsApp" /
+  "واتساب", or the ad links to wa.me or api.whatsapp.com.
+  Do NOT set it true for either of these, which look similar but mean something else:
+    * the ad's PLATFORMS / placement list (Facebook, Instagram, Messenger,
+      Audience Network, WhatsApp). That says where the ad was SHOWN, not where the
+      button goes, and it is the most common false positive here.
+    * a plain "Send message" / "إرسال رسالة" button, which is Messenger or WhatsApp
+      and is genuinely ambiguous.
+  false if the advertiser has ads but no WhatsApp button; omit if you cannot tell.
+- contact_phones: every phone number that appears in the ad's own body text, as an
+  array of digit-only strings (Iraqi mobiles look like 07XXXXXXXXX or
+  9647XXXXXXXXX). Advertisers here routinely publish their number in the ad copy —
+  take those verbatim. Include a number from a wa.me link too. Omit the field if
+  there are none. Never invent, complete or infer a number.
 
 Return ONLY valid JSON. No prose. If no advertisers found, return [].`;
 

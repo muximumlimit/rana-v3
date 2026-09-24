@@ -43,6 +43,7 @@ function buildRow(lead) {
     status:               lead.status,
 
     running_ads:          lead.running_ads ?? true,
+    whatsapp_cta:         lead.whatsapp_cta ?? null,
     ad_count:             lead.ad_count ?? null,
     ad_creative_urls:     lead.ad_creative_urls ?? [],
     ad_start_date:        lead.ad_start_date ?? null,

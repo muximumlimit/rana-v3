@@ -40,6 +40,7 @@ export async function startRun() {
     dropped: 0,
     dropped_hard_block: 0,
     dropped_activity_gate: 0,
+    whatsapp_cta_count: 0,
     total_cost_usd: 0,
     firecrawl_errors: 0,
     firecrawl_failed: false,
@@ -81,6 +82,7 @@ async function executePipeline(runId, runState) {
     runState.dropped              = result.dropped;
     runState.dropped_hard_block   = result.dropped_hard_block;
     runState.dropped_activity_gate = result.dropped_activity_gate;
+    runState.whatsapp_cta_count    = result.whatsapp_cta_count ?? 0;
     runState.total_cost_usd       = result.total_cost_usd;
     runState.firecrawl_failed     = result.firecrawl_failed;
     runState.status = 'completed';
