@@ -107,12 +107,35 @@ const FB_CATEGORY = {
 
 const normCategory = c => String(c ?? '').replace(/[‎‏‪-‮]/g, '').trim().toLowerCase();
 
+// Umbrella categories: they map to a sector, but a concrete category elsewhere in
+// the list should win. "Aumary Al Mansour" is filed Residence; Hotel; Lodging —
+// first-category-wins called it real_estate, while its ad copy sells hotel stays.
+const BROAD_CATEGORY = new Set([
+  'residence', 'lodging', 'home & garden', 'منازل وحدائق', 'travel & transport',
+  'health/beauty', 'health & beauty', 'صحة/تجميل', 'shopping mall', 'retail company',
+  'general store', 'discount shopping', 'household supplies', 'construction', 'بناء',
+  'education', 'entertainment', 'clothing', 'ملابس', 'apparel', 'food service',
+  'real estate', 'energy company', 'public utility', 'tools/equipment',
+]);
+
+// Most specific wins: concrete categories beat umbrella ones; among equals, the
+// sector named by more of the page's categories; then Facebook's own order.
 export function sectorFromCategories(categories = []) {
-  for (const c of categories) {                        // Facebook lists the primary category first
-    const s = FB_CATEGORY[normCategory(c)];
-    if (s) return { sector: s, matched: c };
-  }
-  return null;
+  const cands = new Map();                          // sector -> { specific, votes, first, matched }
+  categories.forEach((c, i) => {
+    const key = normCategory(c);
+    const s = FB_CATEGORY[key];
+    if (!s) return;
+    const cur = cands.get(s) ?? { specific: false, votes: 0, first: i, matched: c };
+    const specific = !BROAD_CATEGORY.has(key);
+    if (specific && !cur.specific) { cur.specific = true; cur.matched = c; }
+    cur.votes++;
+    cands.set(s, cur);
+  });
+  if (!cands.size) return null;
+  const [sector, best] = [...cands.entries()].sort(([, a], [, b]) =>
+    (b.specific - a.specific) || (b.votes - a.votes) || (a.first - b.first))[0];
+  return { sector, matched: best.matched };
 }
 
 // ── 2. Whole-word ad-copy / name keywords ────────────────────────────────────

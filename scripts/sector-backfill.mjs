@@ -14,6 +14,22 @@ import { scoreFit, qualify } from '../src/scoring/dimensions.js';
 import * as claude from '../src/lib/claude.js';
 
 const WRITE = process.argv.includes('--write');
+
+// Human-reviewed corrections, keyed by facebook_page_id. Applied after the
+// classifier; each carries the evidence it was decided on.
+const OVERRIDES = {
+  '100481691561245': { sector: 'b2b_services', by: 'Yousif 2026-09-26',
+    reason: 'تجهيزات الياسمين الغذائية — Haiku said manufacturer; only ad: "رأي الزبائن بمنتجاتي… توصيل لكل مناطق بغداد #مطاعم #تجهيزات #غذائيه", categories Product/service only. Sells and delivers food supplies; no production mentioned → distributor, not factory.' },
+};
+
+// Stored sectors Yousif approved replacing (2026-09-26). Written only if the
+// stored value is still `from`. Aumary Al Mansour (stored hotel) deliberately absent: KEEP.
+const APPROVED_CHANGES = [
+  { page_id: null, name: 'شركة الوجهة العالمية لنقل المسافرين 2', from: 'b2b_services', to: 'travel_tourism' },
+  { page_id: null, name: 'محطة 718', from: 'automotive_showroom', to: 'auto_service' },
+  { page_id: null, name: 'Brands Oil - براندس اويل', from: 'automotive_showroom', to: 'auto_service' },
+  { page_id: null, name: 'قلعة الزهور لتوزيع النباتات الصناعية جملة-مفرد', from: 'b2b_services', to: 'events_gifts' },
+];
 const DIR = 'C:/xstudio/bridge/sector-backfill';
 const SNAP = JSON.parse(fs.readFileSync(`${DIR}/apify-snapshot-2026-09-26.json`, 'utf8'));
 const CACHE_F = `${DIR}/classified-2026-09-26.json`;
@@ -42,8 +58,11 @@ for (const l of leads) {
       cache[l.id] = res;
     }
   }
+  const ov = OVERRIDES[String(l.facebook_page_id)];
+  if (ov) res = { sector: ov.sector, via: 'override', matched: `${ov.by}: was ${res.sector} (${res.via})` };
   rows.push({ l, a, res });
 }
+fs.writeFileSync(`${DIR}/results-latest.json`, JSON.stringify(Object.fromEntries(rows.map(r => [r.l.id, { name: r.l.business_name, stored: r.l.sector, sector: r.res.sector, via: r.res.via }])), null, 1));
 fs.writeFileSync(CACHE_F, JSON.stringify(cache, null, 1));
 
 const count = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
@@ -125,5 +144,18 @@ if (WRITE) {
     const d = res.ok ? await res.json() : [];
     (d.length === 1 && d[0].sector === r.res.sector) ? ok++ : fail++;
   }
-  console.log(`\nWRITTEN sector on ${ok}, failed ${fail}`);
+  console.log(`\nWRITTEN sector on ${ok} NULL lead(s), failed ${fail}`);
+
+  let aok = 0;
+  for (const c of APPROVED_CHANGES) {
+    const r = rows.find(x => x.l.business_name.trim() === c.name.trim());
+    if (!r) { console.log(`  approved change: lead not found — ${c.name}`); continue; }
+    const res = await fetch(`${SB}/rest/v1/leads?id=eq.${r.l.id}&sector=eq.${c.from}&select=id,sector`, {
+      method: 'PATCH', headers: { ...H, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({ sector: c.to }) });
+    const d = res.ok ? await res.json() : [];
+    if (d.length === 1 && d[0].sector === c.to) aok++;
+    else console.log(`  approved change NOT applied (stored value no longer ${c.from}?) — ${c.name}`);
+  }
+  console.log(`APPROVED stored-sector changes applied: ${aok}/${APPROVED_CHANGES.length}`);
 }

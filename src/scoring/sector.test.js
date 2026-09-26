@@ -16,8 +16,19 @@ test('generic categories carry no sector and fall through', () => {
   assert.equal(sectorFromCategories(['‎Brand‎']), null, 'bidi marks stripped, still generic');
 });
 
-test('first specific category wins (Facebook lists the primary first)', () => {
+test('among equally specific categories, Facebook order breaks the tie', () => {
   assert.equal(sectorFromCategories(['Business', 'Furniture', 'Restaurant']).sector, 'furniture_home');
+});
+
+test('INTENT: the most specific category wins over an earlier umbrella one (Aumary)', () => {
+  const r = sectorFromCategories(['Residence', 'Hotel', 'Lodging']);
+  assert.deepEqual([r.sector, r.matched], ['hotel', 'Hotel']);
+  assert.equal(sectorFromCategories(['Home & Garden', 'Electronics']).sector, 'electronics_appliances');
+  assert.equal(sectorFromCategories(['Residence']).sector, 'real_estate', 'an umbrella category alone still counts');
+});
+
+test('equal specificity: more categories naming the same sector win', () => {
+  assert.equal(sectorFromCategories(['Furniture', 'Hotel', 'Resort']).sector, 'hotel');
 });
 
 // ── 2. whole-word ad copy ────────────────────────────────────────────────────
