@@ -22,6 +22,8 @@ export const ICP_SECTOR_VALUES = new Set([
   'fmcg', 'packaged_fmcg',
   'b2b_services',
   'automotive', 'automotive_showroom', 'auto_service',
+  // Widened by Yousif 2026-09-26 (same change in lara-v2 crm.js).
+  'furniture_home', 'electronics_appliances', 'construction_materials', 'travel_tourism',
 ]);
 
 // Every label this classifier can emit — ONE canonical label per sector. Lara also
@@ -198,8 +200,19 @@ export function sectorFromText({ name = '', bodies = [] }) {
   return { sector: top[0], matched: top[1].found.join(', ') };
 }
 
-// ── 1 + 2: deterministic, synchronous ────────────────────────────────────────
+// ── 0. The business's own name beats a shopfront label ───────────────────────
+// A page named "مصنع الجبال" but filed under "Electrical Supply Store" is a factory
+// that sells electrical goods, not a shop (Yousif, 2026-09-26). Whole words in
+// the NAME only — ad copy mentioning a factory proves nothing about the advertiser.
+const FACTORY_NAME_WORDS = ['مصنع', 'مصانع', 'معمل', 'factory'].map(w => [normalizeArabic(w)]);
+export function factoryInName(name) {
+  const toks = tokens(name);
+  return FACTORY_NAME_WORDS.some(p => hits(toks, p));
+}
+
+// ── 0 + 1 + 2: deterministic, synchronous ────────────────────────────────────
 export function classifySectorDeterministic(adv) {
+  if (factoryInName(adv.name)) return { sector: 'manufacturer', via: 'name_factory', matched: adv.name };
   const cat = sectorFromCategories(adv.categories);
   if (cat) return { sector: cat.sector, via: 'fb_category', matched: cat.matched };
   const txt = sectorFromText({ name: adv.name, bodies: adv.bodies ?? adv.creative_snippets ?? [] });

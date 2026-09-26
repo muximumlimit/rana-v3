@@ -48,6 +48,24 @@ test('category beats ad copy', () => {
   assert.deepEqual([r.sector, r.via], ['hotel', 'fb_category']);
 });
 
+test('INTENT: factory / مصنع / معمل in the NAME beats the Facebook category', () => {
+  const ddk = classifySectorDeterministic({ name: 'مصنع الجبال - DDK', categories: ['Electrical Supply Store'], bodies: [] });
+  assert.deepEqual([ddk.sector, ddk.via], ['manufacturer', 'name_factory']);
+  assert.equal(classifySectorDeterministic({ name: 'معمل خزانات الوطني', categories: ['Furniture'] }).sector, 'manufacturer');
+  assert.equal(classifySectorDeterministic({ name: 'Rashid Factory', categories: ['Shopping'] }).sector, 'manufacturer');
+  assert.equal(classifySectorDeterministic({ name: 'والمصنع الحديث', categories: [] }).sector, 'manufacturer', 'prefixed form');
+});
+
+test('a factory mentioned only in ad COPY does not override the category', () => {
+  const r = classifySectorDeterministic({ name: 'بيت الاثاث', categories: ['Furniture'], bodies: ['من المصنع الى بيتك', 'مصنع معتمد'] });
+  assert.deepEqual([r.sector, r.via], ['furniture_home', 'fb_category']);
+});
+
+test('widened ICP: the four added sectors earn fit', () => {
+  for (const s of ['furniture_home', 'electronics_appliances', 'construction_materials', 'travel_tourism'])
+    assert.equal(isIcpSector(s), true, s);
+});
+
 // ── 3. Haiku only for the residue ────────────────────────────────────────────
 test('Haiku is not called when 1 or 2 resolve', async () => {
   let called = 0;
@@ -74,10 +92,10 @@ test('Haiku resolves the residue, only to an allowed label', async () => {
 test('INTENT: fit follows sector — ICP sector earns fit, non-ICP does not', () => {
   const fashion = { name: 'Chantal', categories: ["Men's Clothing"], bodies: [] };
   assert.equal(scoreFit(fashion, ''), 60);
-  const furniture = { name: 'أورفا هوم', categories: ['Furniture'], bodies: ['منتج اصلي'] };
-  assert.equal(scoreFit(furniture, ''), 0, "no fit from 'منتج' any more");
-  assert.equal(scoreFit(furniture, '', 'manufacturer'), 60, 'an explicitly passed sector is what counts');
-  assert.equal(isIcpSector('furniture_home'), false);
+  const legal = { name: 'شركة الحلول', categories: ['Lawyer'], bodies: ['منتج اصلي'] };
+  assert.equal(scoreFit(legal, ''), 0, "no fit from 'منتج' any more");
+  assert.equal(scoreFit(legal, '', 'manufacturer'), 60, 'an explicitly passed sector is what counts');
+  assert.equal(isIcpSector('legal'), false);
 });
 
 test('premium bonus is whole-word', () => {

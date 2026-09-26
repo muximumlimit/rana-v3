@@ -9,7 +9,7 @@
 // the answers the dry run reported. Needs SUPABASE_URL, SUPABASE_SERVICE_KEY,
 // ANTHROPIC_API_KEY in env.
 import fs from 'node:fs';
-import { classifySector, isIcpSector } from '../src/scoring/sector.js';
+import { classifySector, classifySectorDeterministic, isIcpSector } from '../src/scoring/sector.js';
 import { scoreFit, qualify } from '../src/scoring/dimensions.js';
 import * as claude from '../src/lib/claude.js';
 
@@ -29,12 +29,18 @@ const rows = [];
 for (const l of leads) {
   const a = SNAP.advertisers[String(l.facebook_page_id)];
   if (!a) { rows.push({ l, res: { sector: null, via: 'no_snapshot' } }); continue; }
-  let res = cache[l.id];
-  if (!res) {
-    res = await classifySector({ name: a.name ?? l.business_name, categories: a.categories, bodies: a.bodies },
-      { llm: async p => { llmCalls++; return claude.haikuShort(p); } });
-    llmCost += res.cost_usd || 0;
-    cache[l.id] = res;
+  const adv = { name: a.name ?? l.business_name, categories: a.categories, bodies: a.bodies };
+  // Deterministic steps are always recomputed (so rule changes apply); only a
+  // cached Haiku answer is reused, so the write matches what the dry run showed.
+  let res = classifySectorDeterministic(adv);
+  if (!res.sector) {
+    const hit = cache[l.id];
+    if (hit && String(hit.via).startsWith('llm')) res = hit;
+    else {
+      res = await classifySector(adv, { llm: async p => { llmCalls++; return claude.haikuShort(p); } });
+      llmCost += res.cost_usd || 0;
+      cache[l.id] = res;
+    }
   }
   rows.push({ l, a, res });
 }
@@ -62,7 +68,31 @@ for (const [st, rs] of Object.entries(Object.groupBy(nulls, r => r.l.status)))
 const set = rows.filter(r => r.l.sector);
 const disagree = set.filter(r => r.res.sector && r.res.sector !== r.l.sector);
 console.log(`\nAlready had a sector: ${set.length}; new classifier agrees ${set.filter(r => r.res.sector === r.l.sector).length}, differs ${disagree.length}, unresolved ${set.filter(r => !r.res.sector).length} (NOT overwritten by --write)`);
-for (const r of disagree) console.log(`  ${r.l.business_name} | stored ${r.l.sector} → new ${r.res.sector} (${r.res.via}: ${r.res.matched ?? ''})`);
+// Evidence: how the OLD inferSector (pre-fb42262 regex over name + categories)
+// produced the stored value, next to what the new classifier used.
+const OLD = [
+  ['premium_restaurant', /مطعم|restaurant|food brand|طعام/], ['cafe', /كافيه|cafe|coffee|قهوة/], ['hotel', /hotel|فندق/],
+  ['fashion_retail', /fashion|بوتيك|boutique|ملابس/], ['jewelry', /jewelry|مجوهرات|ذهب/],
+  ['manufacturer', /مصنع|manufacturer|factory|تصنيع|plastics|بلاستيك|cement|اسمنت|precast|مواد بناء/],
+  ['packaged_fmcg', /مواد غذائية|fmcg|packaged food|haircare|beverage|personal care|consumer goods/],
+  ['automotive_showroom', /سيارات|automotive|cars|auto|معرض سيارات|car showroom|voyah|toyota|kia|hyundai/],
+  ['b2b_services', /distribution|توزيع|logistics|نقل|import|استيراد|export|تصدير|lab|مختبر/],
+  ['real_estate', /real estate|عقار|property|developer|مطور/],
+];
+const oldWhy = (name, cats) => {
+  const txt = [name, ...(cats ?? [])].join(' ').toLowerCase();
+  for (const [s, re] of OLD) { const m = txt.match(re); if (m) return `${s} via /${m[0]}/`; }
+  return 'no old match (set elsewhere)';
+};
+for (const r of disagree) {
+  console.log(`\n  ● ${r.l.business_name}   [status ${r.l.status}${poolReadyish(r) ? ', IN SEND POOL' : ''}]`);
+  console.log(`    stored: ${r.l.sector}   — old regex: ${oldWhy(r.a?.name ?? r.l.business_name, r.a?.categories)}`);
+  console.log(`    new:    ${r.res.sector}   — ${r.res.via}${r.res.matched ? `: ${r.res.matched}` : ''}   ${isIcpSector(r.l.sector) && !isIcpSector(r.res.sector) ? '⚠ would LEAVE the ICP' : ''}`);
+  console.log(`    FB categories: ${(r.a?.categories ?? []).join('; ') || '—'}`);
+  const copy = (r.a?.bodies ?? [])[0];
+  if (copy) console.log(`    ad copy: ${copy.replace(/\s+/g, ' ').slice(0, 160)}…`);
+}
+function poolReadyish(r) { return r.l.status === 'Qualified' && r.l.whatsapp_verified === true && r.l.phone_e164; }
 
 // Pool impact: Qualified leads that would pass Lara's sector filter once filled.
 const poolReady = r => r.l.status === 'Qualified' && r.l.whatsapp_verified === true && r.l.v1_contacted === false
