@@ -186,6 +186,7 @@ export async function runSource(targets, runState) {
         // banked for review and cannot reach the blast path until someone validates
         // them (Whapi) and promotes them deliberately.
         phone:             firstPhone(advertiser.contact_phones),
+        ad_copy_phone:     firstPhone(advertiser.contact_phones),
         budget_score:      budgetScore,
         fit_score:         fitScore,
         size_score:        sizeScore,

@@ -418,6 +418,7 @@ export async function runSource(targets, runState) {
           facebook_page_id: a.facebook_page_id,
           facebook_page_url: a.facebook_page_url,
           phone: rawPhone,            // phone_e164 deliberately absent
+          ad_copy_phone: rawPhone,    // provenance: survives anything later written to `phone`
           budget_score: budgetScore, fit_score: fitScore, size_score: sizeScore,
           primary_hook: pickPrimaryHook({ discovery_source: 'ad_library' }),
         });

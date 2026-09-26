@@ -37,6 +37,10 @@ function buildRow(lead) {
     sector:               lead.sector || null,
     phone:                lead.phone || null,
     phone_e164:           lead.phone_e164 || null,
+    // Provenance copy of the ad-copy number. `phone` can later be filled or
+    // replaced by other sources; this column only ever holds what the advertiser
+    // published. Must be listed here — fields absent from this row are dropped.
+    ad_copy_phone:        lead.ad_copy_phone || null,
 
     source:               'rana-v3',
     discovery_source:     lead.discovery_source,
