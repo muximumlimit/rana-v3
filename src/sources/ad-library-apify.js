@@ -17,7 +17,9 @@
 //   - it never writes status 'Qualified'.
 import { findExisting, normalizeName } from '../lib/dedup.js';
 import { upsertLead, enrichExisting, getClient } from '../lib/supabase.js';
-import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, inferSector } from '../scoring/dimensions.js';
+import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify } from '../scoring/dimensions.js';
+import { classifySector } from '../scoring/sector.js';
+import { haikuShort } from '../lib/claude.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
 
@@ -33,6 +35,10 @@ const APIFY_BASE = 'https://api.apify.com/v2';
 // alone proves the advertiser is spending right now. Quality still gates downstream
 // in qualify(), which needs budget>=60 AND fit>=50.
 const ACTIVITY_MIN_ADS = parseInt(process.env.APIFY_ACTIVITY_MIN_ADS, 10) || 1;
+// Haiku sector calls per run, for advertisers the category lookup and ad-copy
+// keywords leave unresolved. Measured residue on the 09-24..26 backfill: see
+// bridge/sector-backfill. Past the cap a lead is written with sector NULL, as before.
+const SECTOR_LLM_MAX = parseInt(process.env.SECTOR_LLM_MAX, 10) || 60;
 
 // Apify list pricing for this actor, confirmed from its pricingInfos 2026-09-24.
 // `usageTotalUsd` on a run does NOT include per-event dataset charges, so budget
@@ -351,14 +357,25 @@ export async function runSource(targets, runState) {
   m.whapi_valid = valid.size;
 
   // --- write ----------------------------------------------------------------
+  const sectorVia = {};
+  let sectorLlmCalls = 0, sectorLlmCost = 0;
   for (const a of kept) {
     const advertiser = {
       name: a.name, categories: a.categories, creative_snippets: a.creative_snippets,
+      bodies: a.bodies,
       ad_count: a.ad_count_proxy, ad_start_date: a.ad_start_date,
       facebook_page_id: a.facebook_page_id, facebook_page_url: a.facebook_page_url,
     };
+    // Classified ONCE; the same answer fills `sector` and drives fit.
+    const llm = sectorLlmCalls < SECTOR_LLM_MAX
+      ? async (p) => { sectorLlmCalls++; return haikuShort(p); }
+      : null;
+    const sec = await classifySector(advertiser, { llm });
+    sectorLlmCost += sec.cost_usd || 0;
+    sectorVia[sec.via ?? 'none'] = (sectorVia[sec.via ?? 'none'] || 0) + 1;
+
     const budgetScore = scoreBudget(advertiser);
-    const fitScore    = scoreFit(advertiser, '');
+    const fitScore    = scoreFit(advertiser, '', sec.sector);
     const sizeScore   = scoreSize(a.ad_count_proxy);
     const status      = qualify(budgetScore, fitScore);
     if (status === 'Dropped') continue;
@@ -407,7 +424,7 @@ export async function runSource(targets, runState) {
         await upsertLead({
           business_name: a.name,
           normalized_name: normalizeName(a.name),
-          sector: inferSector(advertiser),
+          sector: sec.sector,
           discovery_source: 'ad_library_apify',
           status,
           running_ads: true,
@@ -438,6 +455,9 @@ export async function runSource(targets, runState) {
     phones_on_kept_advertisers: allPhones.length,
     advertisers_kept: kept.length,
     whapi_valid_share: m.whapi_checked ? Number((m.whapi_valid / m.whapi_checked).toFixed(4)) : null,
+    sector_via: sectorVia,                 // fb_category | ad_copy | llm | llm_unknown | llm_error | none
+    sector_llm_calls: sectorLlmCalls,
+    sector_llm_cost_usd: Number(sectorLlmCost.toFixed(5)),
     icp_allowed_share: m.advertisers ? Number((m.icp_allowed / m.advertisers).toFixed(4)) : null,
   };
   await persist(supabase, m);

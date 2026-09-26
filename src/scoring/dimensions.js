@@ -1,22 +1,8 @@
-// ICP sectors — leads matching these receive fit_score bonus
-const ICP_SECTORS = [
-  // HORECA
-  'restaurant', 'cafe', 'coffee', 'hotel', 'مطعم', 'كافيه', 'فندق',
-  // Manufacturing / products
-  'manufacturer', 'factory', 'مصنع', 'تصنيع', 'plastics', 'بلاستيك',
-  'cement', 'اسمنت', 'precast', 'مواد بناء',
-  // FMCG / packaged brands
-  'fmcg', 'packaged', 'مواد غذائية', 'food brand', 'beverage', 'haircare',
-  'personal care', 'consumer goods', 'منتج', 'علامة تجارية',
-  // Fashion / jewelry (single-location OK per ICP)
-  'fashion', 'boutique', 'بوتيك', 'ملابس', 'jewelry', 'مجوهرات', 'ذهب',
-  // Automotive
-  'automotive', 'سيارات', 'معرض سيارات', 'car showroom', 'cars', 'auto',
-  'وكالة سيارات', 'voyah', 'toyota', 'kia', 'hyundai', 'ford',
-  // B2B services / distribution
-  'distribution', 'توزيع', 'import', 'استيراد', 'export', 'تصدير',
-  'logistics', 'نقل', 'lab services', 'مختبر', 'b2b',
-];
+import { classifySectorDeterministic, isIcpSector } from './sector.js';
+
+// ICP fit now comes from scoring/sector.js (ICP_SECTOR_VALUES). The old keyword
+// list here substring-matched ad copy ('منتج', 'auto', 'نقل') and disagreed with
+// inferSector, which is how fit and sector drifted apart.
 
 // Hard block — drop immediately, never score or write to DB
 const HARD_BLOCK = [
@@ -47,6 +33,7 @@ function tokenSet(s) {
 }
 
 const HARD_BLOCK_TOKENS = new Set(HARD_BLOCK.map(t => normalizeArabic(t.toLowerCase())));
+const PREMIUM_TOKENS = PREMIUM_HINTS.map(t => normalizeArabic(t.toLowerCase()));
 
 export function isHardBlocked(advertiser, searchTerm) {
   const text = [
@@ -81,22 +68,22 @@ export function scoreBudget(advertiser) {
   return Math.min(score, 100);
 }
 
-export function scoreFit(advertiser, searchTerm) {
+// Fit is driven by the SAME sector classification that fills `sector`
+// (scoring/sector.js), so a lead can no longer earn ICP fit from one keyword list
+// and get sector=NULL from another. Pass the classified sector when the caller
+// already has it (it may come from Haiku); otherwise the deterministic steps run.
+export function scoreFit(advertiser, searchTerm, sector) {
+  const s = sector !== undefined
+    ? sector
+    : classifySectorDeterministic({ ...advertiser, bodies: [...(advertiser.bodies ?? advertiser.creative_snippets ?? []), searchTerm ?? ''] }).sector;
+
   let score = 0;
-  const combined = [
-    advertiser.name ?? '',
-    (advertiser.categories ?? []).join(' '),
-    (advertiser.creative_snippets ?? []).join(' '),
-    searchTerm ?? '',
-  ].join(' ').toLowerCase();
+  if (isIcpSector(s)) score += 60;
 
-  // ICP sector match
-  const icpMatch = ICP_SECTORS.some(s => combined.includes(s));
-  if (icpMatch) score += 60;
-
-  // Premium positioning bonus (applies across all ICP sectors)
-  const premiumMatch = PREMIUM_HINTS.some(p => combined.includes(p));
-  if (premiumMatch) score += 20;
+  // Premium positioning bonus — whole words, not substrings.
+  const toks = tokenSet([advertiser.name ?? '', (advertiser.categories ?? []).join(' '),
+    (advertiser.bodies ?? advertiser.creative_snippets ?? []).join(' ')].join(' '));
+  if (PREMIUM_TOKENS.some(p => toks.has(p))) score += 20;
 
   return Math.min(score, 100);
 }
@@ -116,21 +103,8 @@ export function qualify(budgetScore, fitScore) {
   return 'Dropped';
 }
 
+// Kept for callers that only need the deterministic answer. New code should call
+// classifySector() once and pass its sector to scoreFit().
 export function inferSector(advertiser) {
-  const combined = [
-    advertiser.name ?? '',
-    (advertiser.categories ?? []).join(' '),
-  ].join(' ').toLowerCase();
-
-  if (combined.match(/مطعم|restaurant|food brand|طعام/)) return 'premium_restaurant';
-  if (combined.match(/كافيه|cafe|coffee|قهوة/))           return 'cafe';
-  if (combined.match(/hotel|فندق/))                        return 'hotel';
-  if (combined.match(/fashion|بوتيك|boutique|ملابس/))      return 'fashion_retail';
-  if (combined.match(/jewelry|مجوهرات|ذهب/))               return 'jewelry';
-  if (combined.match(/مصنع|manufacturer|factory|تصنيع|plastics|بلاستيك|cement|اسمنت|precast|مواد بناء/)) return 'manufacturer';
-  if (combined.match(/مواد غذائية|fmcg|packaged food|haircare|beverage|personal care|consumer goods/))    return 'packaged_fmcg';
-  if (combined.match(/سيارات|automotive|cars|auto|معرض سيارات|car showroom|voyah|toyota|kia|hyundai/))    return 'automotive_showroom';
-  if (combined.match(/distribution|توزيع|logistics|نقل|import|استيراد|export|تصدير|lab|مختبر/))          return 'b2b_services';
-  if (combined.match(/real estate|عقار|property|developer|مطور/))                                         return 'real_estate';
-  return null;
+  return classifySectorDeterministic(advertiser).sector;
 }

@@ -2,7 +2,8 @@ import { scrapeAdLibraryWithRetry } from '../lib/firecrawl.js';
 import { parseAdLibraryContent } from '../lib/claude.js';
 import { findExisting, normalizeName } from '../lib/dedup.js';
 import { upsertLead, enrichExisting } from '../lib/supabase.js';
-import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, inferSector } from '../scoring/dimensions.js';
+import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify } from '../scoring/dimensions.js';
+import { classifySectorDeterministic } from '../scoring/sector.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
 
@@ -106,8 +107,13 @@ export async function runSource(targets, runState) {
       seen.add(dedupeKey);
 
       // Score
+      // One classification feeds both `sector` and fit (scoring/sector.js).
+      // Deterministic only here: this fallback path already pays for a Haiku parse.
+      const sec = classifySectorDeterministic({
+        ...advertiser, bodies: [...(advertiser.creative_snippets ?? []), searchTerm ?? ''],
+      });
       const budgetScore = scoreBudget(advertiser);
-      const fitScore    = scoreFit(advertiser, searchTerm);
+      const fitScore    = scoreFit(advertiser, searchTerm, sec.sector);
       const sizeScore   = scoreSize(advertiser.ad_count);
       const status      = qualify(budgetScore, fitScore);
 
@@ -170,7 +176,7 @@ export async function runSource(targets, runState) {
       const lead = {
         business_name:     advertiser.name,
         normalized_name:   dedupeKey,
-        sector:            inferSector(advertiser),
+        sector:            sec.sector,
         discovery_source:  'ad_library',
         source:            'rana-v3',
         status,

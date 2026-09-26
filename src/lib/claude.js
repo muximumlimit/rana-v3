@@ -45,6 +45,21 @@ function stripLoneSurrogates(str) {
   );
 }
 
+// Short single-answer Haiku call (sector classification). Returns text + cost.
+export async function haikuShort(prompt, maxTokens = 60) {
+  const msg = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: stripLoneSurrogates(prompt) }],
+  });
+  const inputTokens = msg.usage?.input_tokens ?? 0;
+  const outputTokens = msg.usage?.output_tokens ?? 0;
+  return {
+    text: msg.content[0]?.text || '',
+    cost_usd: (inputTokens / 1_000_000) * 0.80 + (outputTokens / 1_000_000) * 4.00,
+  };
+}
+
 export async function parseAdLibraryContent(markdown, html) {
   const content = markdown || html || '';
   if (!content || content.length < 100) {
