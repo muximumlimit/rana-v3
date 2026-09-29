@@ -2,7 +2,7 @@ import { scrapeAdLibraryWithRetry } from '../lib/firecrawl.js';
 import { parseAdLibraryContent } from '../lib/claude.js';
 import { findExisting, normalizeName } from '../lib/dedup.js';
 import { upsertLead, enrichExisting } from '../lib/supabase.js';
-import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify } from '../scoring/dimensions.js';
+import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus } from '../scoring/dimensions.js';
 import { classifySectorDeterministic } from '../scoring/sector.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
@@ -157,9 +157,10 @@ export async function runSource(targets, runState) {
         // Awaiting Human, Contacted, Engaged) must never be clobbered back to Discovered.
         // This matters now that the activity gate (5->3) lets more advertisers reach dedup.
         // (Extends ee524fb's terminal-status protection.) Other fields still enrich.
-        if (existing.status === 'Discovered') {
-          enrichFields.status = status;
-        }
+        // BacklogV3 is pre-enrichment too and is re-graded as well (2026-09-29): a lead
+        // whose fit rose was otherwise stranded there — stage8 only enriches Discovered.
+        const regraded = regradeStatus(existing.status, budgetScore, fitScore);
+        if (regraded) enrichFields.status = regraded;
 
         try {
           await enrichExisting(existing.id, enrichFields);

@@ -103,6 +103,17 @@ export function qualify(budgetScore, fitScore) {
   return 'Dropped';
 }
 
+// Statuses a re-score may move a lead between. Anything past these (Qualified, Contacted…)
+// belongs to stage8/Lara and is never touched by a re-score. The database enforces the same
+// rule for every writer (migrations/004_regrade_on_sector_fit.sql).
+export const PRE_ENRICH_STATUSES = ['Discovered', 'BacklogV3'];
+
+/** The status an existing lead should have after a re-score, or null to leave it alone. */
+export function regradeStatus(currentStatus, budgetScore, fitScore) {
+  if (!PRE_ENRICH_STATUSES.includes(currentStatus)) return null;
+  return qualify(budgetScore, fitScore);
+}
+
 // Kept for callers that only need the deterministic answer. New code should call
 // classifySector() once and pass its sector to scoreFit().
 export function inferSector(advertiser) {

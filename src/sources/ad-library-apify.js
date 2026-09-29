@@ -17,7 +17,7 @@
 //   - it never writes status 'Qualified'.
 import { findExisting, normalizeName } from '../lib/dedup.js';
 import { upsertLead, enrichExisting, getClient } from '../lib/supabase.js';
-import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify } from '../scoring/dimensions.js';
+import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus } from '../scoring/dimensions.js';
 import { classifySector } from '../scoring/sector.js';
 import { haikuShort } from '../lib/claude.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
@@ -417,7 +417,10 @@ export async function runSource(targets, runState) {
         // undefined and would silently overwrite a real rana-v2 number with one
         // scraped from ad copy. New rows get the phone; existing rows keep theirs.
         if (rawPhone) logger.info({ id: existing.id, name: a.name }, 'ad-copy phone found for an existing lead — not written, existing phone preserved');
-        if (existing.status === 'Discovered') fields.status = status;
+        // Re-grade Discovered AND BacklogV3 (was Discovered only): a BacklogV3 lead whose fit
+        // rose was stranded there forever — stage8 only enriches Discovered.
+        const regraded = regradeStatus(existing.status, budgetScore, fitScore);
+        if (regraded) fields.status = regraded;
         await enrichExisting(existing.id, fields);
         m.leads_enriched++;
       } else {

@@ -20,14 +20,30 @@ async function loadTargets() {
 // every run (the saturation that produced new=0). A window of TERMS_PER_NIGHT slides
 // through the full list keyed on the UTC day-of-month, wrapping around — so each night
 // surfaces different advertisers and Firecrawl/Claude cost stays flat (~15 terms/run).
-function rotateTerms(allTerms, perNight) {
+// `day` is a continuous day number (days since the epoch), not the day of the month: a
+// month-day key restarted the window on the 1st, so after a 31st the same terms ran twice.
+const epochDay = () => Math.floor(Date.now() / 86_400_000);
+export function rotateTerms(allTerms, perNight, day = epochDay()) {
   const n = Math.min(perNight, allTerms.length);
   if (n >= allTerms.length) return allTerms;
-  const day = new Date().getUTCDate(); // 1..31
-  const start = ((day - 1) * n) % allTerms.length;
+  const start = (day * n) % allTerms.length;
   const batch = [];
   for (let i = 0; i < n; i++) batch.push(allTerms[(start + i) % allTerms.length]);
   return batch;
+}
+
+// Factories get reserved slots (Yousif 2026-09-29): 4 of the nightly slots always go to
+// factory terms, rotating WITHIN them (8 terms → each runs every 2nd night); the rest
+// rotate through everything else. Running all 8 nightly would burn their unique results
+// and starve the other sectors; running them in the shared window meant factory terms
+// came up ~2 nights in 5, and nights without them wrote 0 factories.
+export function tonightsTerms(targets, perNight, day = epochDay()) {
+  const factory = targets.factory_terms || [];
+  const slots = Math.min(targets.factory_slots_per_night ?? 0, factory.length, perNight);
+  return [
+    ...rotateTerms(factory, slots, day),
+    ...rotateTerms(targets.search_terms, perNight - slots, day),
+  ];
 }
 
 export async function startRun() {
@@ -71,10 +87,11 @@ async function executePipeline(runId, runState) {
 
     // Batch a rotating subset per night (env-tunable, no deploy needed to retune).
     const perNight = parseInt(process.env.TERMS_PER_NIGHT, 10) || targets.terms_per_night || 15;
-    const search_terms = rotateTerms(targets.search_terms, perNight);
+    const search_terms = tonightsTerms(targets, perNight);
+    const termsTotal = targets.search_terms.length + (targets.factory_terms || []).length;
     runState.terms_run = search_terms.length;
-    runState.terms_total = targets.search_terms.length;
-    logger.info({ runId, terms_run: search_terms.length, terms_total: targets.search_terms.length, terms: search_terms }, 'rotated term batch for tonight');
+    runState.terms_total = termsTotal;
+    logger.info({ runId, terms_run: search_terms.length, terms_total: termsTotal, factory_slots: targets.factory_slots_per_night ?? 0, terms: search_terms }, 'rotated term batch for tonight');
 
     // AD_LIBRARY_SOURCE picks the implementation. Default stays 'firecrawl' so
     // nothing changes until the flag is set; the Firecrawl + Haiku path is kept as
