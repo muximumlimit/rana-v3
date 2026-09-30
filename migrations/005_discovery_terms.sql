@@ -1,4 +1,5 @@
--- Rana v3 — which search term found a lead (Yousif 2026-09-30). NOT YET APPLIED.
+-- Rana v3 — which search term found a lead (Yousif 2026-09-30). APPLIED 2026-09-30 17:26 UTC
+-- (column verified in information_schema and through PostgREST).
 --
 -- Three times in a week a question ("did the factory terms find this?") had no answer:
 -- the Apify actor's items do not say which input URL returned them, and leads only
