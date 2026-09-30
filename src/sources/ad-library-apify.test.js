@@ -1,6 +1,77 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractPhones, memoryForUrls } from './ad-library-apify.js';
+import { extractPhones, memoryForUrls, soloTermsTonight, planCalls, estimateRunUsd, projectMonthUsd, termsFor, perCallStats } from './ad-library-apify.js';
+import { tonightsTerms } from '../pipeline.js';
+import targetsJson from '../../config/targets.json' with { type: 'json' };
+
+// ---------------------------------------------------------------------------
+// per-term factory test + term attribution (Yousif 2026-09-30)
+// ---------------------------------------------------------------------------
+const T = { factory_terms: ['مصنع بغداد', 'معمل بغداد'], factory_per_term_until: '2026-10-04' };
+const oct = (d) => new Date(`2026-10-${String(d).padStart(2, '0')}T02:00:00Z`);
+
+test('INTENT: each factory term gets its own call; the rest stay in 4-term batches', () => {
+  const terms = ['مصنع بغداد', 'معمل بغداد', 'a', 'b', 'c', 'd', 'e'];
+  const calls = planCalls(terms, soloTermsTonight(T, terms, oct(1), {}));
+  assert.deepEqual(calls, [
+    { terms: ['مصنع بغداد'], solo: true },
+    { terms: ['معمل بغداد'], solo: true },
+    { terms: ['a', 'b', 'c', 'd'], solo: false },
+    { terms: ['e'], solo: false },
+  ]);
+});
+
+test('INTENT: the test switches itself off after factory_per_term_until, and the env kills it', () => {
+  const terms = ['مصنع بغداد', 'a'];
+  assert.equal(soloTermsTonight(T, terms, oct(4), {}).length, 1, 'the until date is inclusive');
+  assert.deepEqual(soloTermsTonight(T, terms, oct(5), {}), [], 'day after → batches again');
+  assert.deepEqual(soloTermsTonight(T, terms, oct(1), { APIFY_FACTORY_PER_TERM: 'false' }), []);
+  assert.deepEqual(soloTermsTonight({ factory_terms: T.factory_terms }, terms, oct(1), {}), [], 'no date → off');
+  assert.deepEqual(planCalls(terms, []), [{ terms: ['مصنع بغداد', 'a'], solo: false }], 'off = exactly the old plan');
+});
+
+test('the real nightly batch on a test night: 4 solo factory calls + 3 batches = 7 calls', () => {
+  const day = Math.floor(oct(1).getTime() / 86_400_000);
+  const terms = tonightsTerms(targetsJson, 15, day);
+  const calls = planCalls(terms, soloTermsTonight(targetsJson, terms, oct(1), {}));
+  assert.equal(calls.filter(c => c.solo).length, 4);
+  assert.equal(calls.length, 7);
+  assert.equal(new Set(calls.flatMap(c => c.terms)).size, 15, 'every term runs exactly once');
+});
+
+test('INTENT: a lead returned by a solo call is credited to that exact term', () => {
+  const calls = [{ terms: ['مصنع بغداد'], solo: true }, { terms: ['a', 'b', 'c', 'd'], solo: false }];
+  assert.deepEqual(termsFor(new Set([0]), calls), ['مصنع بغداد']);
+  assert.deepEqual(termsFor(new Set([1, 0]), calls), ['مصنع بغداد'], 'solo wins over a batch that also returned it');
+  assert.deepEqual(termsFor(new Set([1]), calls), ['a', 'b', 'c', 'd'], 'batch only → the honest answer is the batch');
+});
+
+test('per_call stats separate thin (under the cap) from starved (hit it)', () => {
+  const calls = [{ terms: ['مصنع بغداد'], solo: true }, { terms: ['معمل بلاستيك بغداد'], solo: true }];
+  const adv = [
+    { name: 'مصنع الجبال', calls: new Set([0]), outcome: 'reseen', factory_named: true },
+    { name: 'معمل جديد', calls: new Set([0, 1]), outcome: 'new', factory_named: true },
+    { name: 'clinic', calls: new Set([1]), outcome: 'blocked', factory_named: false },
+  ];
+  const [a, b] = perCallStats(calls, [{ count: 30, ok: true }, { count: 4, ok: true }], adv);
+  assert.equal(a.hit_cap, true);
+  assert.equal(b.hit_cap, false);
+  assert.deepEqual([a.advertisers, a.factory_named, a.new, a.reseen], [2, 2, ['معمل جديد'], ['مصنع الجبال']]);
+  assert.deepEqual([b.advertisers, b.new, b.blocked], [2, ['معمل جديد'], 1]);
+});
+
+test('BUDGET: October with the 4-night test stays under the $4 alert and the $5 halt', () => {
+  const p = projectMonthUsd({ mtd: 0, now: oct(1), termsPerNight: 15, factorySlots: 4, until: '2026-10-04' });
+  // 4 nights × 7 calls + 27 nights × 4 calls, at 33 ads/call (the observed max)
+  assert.ok(Math.abs(p - (28 * (33 * 0.00075 + 0.00005) + 108 * (33 * 0.00075 + 0.00005))) < 1e-9);
+  assert.ok(p < 4, `projected $${p.toFixed(2)}`);
+});
+
+test('BUDGET: the same plan made permanent would breach the $5 guard — why it is time-boxed', () => {
+  const p = projectMonthUsd({ mtd: 0, now: oct(1), termsPerNight: 15, factorySlots: 4, until: '2026-10-31' });
+  assert.ok(p > 5, `projected $${p.toFixed(2)}`);
+  assert.ok(Math.abs(estimateRunUsd(new Array(7)) - 7 * (33 * 0.00075 + 0.00005)) < 1e-9);
+});
 import { isHardBlocked } from '../scoring/dimensions.js';
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,15 @@ test('ad_copy_phone reaches the inserted row alongside phone', async () => {
   assert.equal(row.phone_e164, null, 'the ad-copy source still never sets phone_e164');
 });
 
+test('discovery_terms reaches the inserted row (it is a whitelist)', async () => {
+  sent.length = 0;
+  await upsertLead({ business_name: 'T', normalized_name: 't', discovery_source: 'ad_library_apify', status: 'Discovered', discovery_terms: ['مصنع بغداد'] });
+  assert.deepEqual(sent.flat()[0].discovery_terms, ['مصنع بغداد']);
+  sent.length = 0;
+  await upsertLead({ business_name: 'U', normalized_name: 'u', discovery_source: 'ad_library', status: 'Discovered' });
+  assert.equal(sent.flat()[0].discovery_terms, null, 'the Firecrawl source has no term → NULL');
+});
+
 test('no ad-copy number → ad_copy_phone is null, not undefined/missing', async () => {
   sent.length = 0;
   await upsertLead({ business_name: 'No Phone', normalized_name: 'no phone', discovery_source: 'ad_library_apify', status: 'Discovered' });

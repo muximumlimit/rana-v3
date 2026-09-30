@@ -44,6 +44,8 @@ function buildRow(lead) {
 
     source:               'rana-v3',
     discovery_source:     lead.discovery_source,
+    // Search term(s) that found it (migration 005); set on insert only, never on enrich.
+    discovery_terms:      lead.discovery_terms?.length ? lead.discovery_terms : null,
     status:               lead.status,
 
     running_ads:          lead.running_ads ?? true,

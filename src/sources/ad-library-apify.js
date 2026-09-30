@@ -18,7 +18,7 @@
 import { findExisting, normalizeName } from '../lib/dedup.js';
 import { upsertLead, enrichExisting, getClient } from '../lib/supabase.js';
 import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus } from '../scoring/dimensions.js';
-import { classifySector } from '../scoring/sector.js';
+import { classifySector, factoryInName } from '../scoring/sector.js';
 import { haikuShort } from '../lib/claude.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
@@ -47,6 +47,85 @@ const USD_PER_AD    = 0.00075;
 const USD_PER_START = 0.00005;
 const MONTHLY_BUDGET_USD = parseFloat(process.env.APIFY_MONTHLY_BUDGET_USD || '5');
 const BUDGET_ALERT_USD   = parseFloat(process.env.APIFY_BUDGET_ALERT_USD   || '4');
+
+// `count: 30` caps a whole actor CALL, not each URL in it (actor input schema; the
+// per-URL cap is a separate `limitPerSource`). Measured 28-33 ads per 4-term call on
+// every night 09-25..09-30: four terms were sharing ~30 ads, so a term later in a
+// batch was starved, not thin. 33 = the observed max, used for budgeting.
+const ADS_PER_CALL = 30;
+const ADS_PER_CALL_BUDGET = 33;
+const TERMS_PER_BATCH = 4;
+
+// ---------------------------------------------------------------------------
+// call plan + term attribution (Yousif 2026-09-30)
+// ---------------------------------------------------------------------------
+// Factory terms get ONE CALL EACH — their own ~30-ad allowance — while
+// `factory_per_term_until` (targets.json, a UTC date, inclusive) has not passed.
+// It is a time-boxed test: 4 nights run every factory term twice, then the plan
+// falls back to 4-term batches on its own. APIFY_FACTORY_PER_TERM=false kills it
+// without a deploy. Kept off permanently for cost: see projectMonthUsd.
+export function soloTermsTonight(targets, terms, now = new Date(), env = process.env) {
+  if (env.APIFY_FACTORY_PER_TERM === 'false') return [];
+  const until = targets.factory_per_term_until;
+  if (!until || now.toISOString().slice(0, 10) > until) return [];
+  const factory = new Set(targets.factory_terms || []);
+  return terms.filter(t => factory.has(t));
+}
+
+export function planCalls(terms, soloTerms = []) {
+  const solo = new Set(soloTerms);
+  const calls = terms.filter(t => solo.has(t)).map(t => ({ terms: [t], solo: true }));
+  const rest = terms.filter(t => !solo.has(t));
+  for (let i = 0; i < rest.length; i += TERMS_PER_BATCH) calls.push({ terms: rest.slice(i, i + TERMS_PER_BATCH), solo: false });
+  return calls;
+}
+
+const callUsd = (nCalls) => nCalls * ADS_PER_CALL_BUDGET * USD_PER_AD + nCalls * USD_PER_START;
+export const estimateRunUsd = (calls) => callUsd(calls.length);
+
+// Month-end spend if every remaining night runs as planned: tonight included, test
+// nights at solo+batched calls, the rest batched. The old projection (month-to-date
+// ÷ day × days) would read a 4-night test as a month of it and page every night.
+export function projectMonthUsd({ mtd, now = new Date(), termsPerNight, factorySlots, until }) {
+  const batchedCalls = Math.ceil(termsPerNight / TERMS_PER_BATCH);
+  const testCalls = factorySlots + Math.ceil((termsPerNight - factorySlots) / TERMS_PER_BATCH);
+  const year = now.getUTCFullYear(), month = now.getUTCMonth();
+  const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  let usd = mtd;
+  for (let d = now.getUTCDate(); d <= last; d++) {
+    const date = new Date(Date.UTC(year, month, d)).toISOString().slice(0, 10);
+    usd += callUsd(until && date <= until ? testCalls : batchedCalls);
+  }
+  return usd;
+}
+
+// Which search term found an advertiser. A solo call names its term exactly, so if
+// any solo call returned it, those terms are the answer. Otherwise it came only from
+// 4-term batches and the honest answer is the batch: every term in it. One element =
+// exact attribution.
+export function termsFor(callIdxs, calls) {
+  const hits = [...callIdxs].sort((a, b) => a - b).map(i => calls[i]);
+  const exact = hits.filter(c => c.solo).map(c => c.terms[0]);
+  return [...new Set(exact.length ? exact : hits.flatMap(c => c.terms))];
+}
+
+// Per-call yield for rana_v3_runs.metadata.per_call. hit_cap = the call returned its
+// full allowance, so the term has at least that many live ads (starved by our cap);
+// under the cap, Meta ran out (thin).
+export function perCallStats(calls, callAds, advertisers) {
+  return calls.map((c, i) => {
+    const mine = advertisers.filter(a => a.calls.has(i));
+    const names = (o) => mine.filter(a => a.outcome === o).map(a => a.name);
+    return {
+      terms: c.terms, solo: c.solo, ok: callAds[i].ok,
+      ads: callAds[i].count, hit_cap: callAds[i].count >= ADS_PER_CALL,
+      advertisers: mine.length,
+      factory_named: mine.filter(a => a.factory_named).length,
+      new: names('new'), reseen: names('reseen'),
+      blocked: names('blocked').length, dropped: names('dropped').length,
+    };
+  });
+}
 
 // ---------------------------------------------------------------------------
 // phone extraction from ad copy
@@ -107,7 +186,7 @@ async function runActorBatch(terms) {
     method: 'POST',
     body: JSON.stringify({
       urls: terms.map(t => ({ url: adLibraryUrl(t) })),
-      count: 30,
+      count: ADS_PER_CALL,
       'scrapePageAds.activeStatus': 'active',
     }),
   });
@@ -224,12 +303,19 @@ export async function runSource(targets, runState) {
   m.dropped_activity_gate = 0;
   m.icp_blocked_on_stored_sector = 0;
 
+  const soloTerms = soloTermsTonight(targets, terms);
+  const calls = planCalls(terms, soloTerms);
+
   // --- budget guard, BEFORE spending anything -------------------------------
   const mtd = await monthToDateUsd();
   const day = new Date().getUTCDate();
   const daysInMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 0)).getUTCDate();
-  const estimateThisRun = terms.length * 10 * USD_PER_AD + Math.ceil(terms.length / 4) * USD_PER_START;
-  const projected = day > 0 ? ((mtd + estimateThisRun) / day) * daysInMonth : mtd;
+  const estimateThisRun = estimateRunUsd(calls);
+  const projected = projectMonthUsd({
+    mtd, termsPerNight: terms.length,
+    factorySlots: Math.min(targets.factory_slots_per_night ?? 0, (targets.factory_terms || []).length),
+    until: soloTerms.length ? targets.factory_per_term_until : null,
+  });
   m.month_to_date_usd = Number(mtd.toFixed(4));
   m.projected_month_usd = Number(projected.toFixed(4));
 
@@ -247,13 +333,19 @@ export async function runSource(targets, runState) {
   }
 
   // --- fetch ----------------------------------------------------------------
+  // One call per plan entry. Every item is tagged with the call that returned it:
+  // the actor's items do not say which input URL they came from.
+  logger.info({ calls: calls.map(c => c.terms), solo: soloTerms.length }, 'apify call plan');
   const ads = [];
-  let starts = 0;
-  for (let i = 0; i < terms.length; i += 4) {
-    const slice = terms.slice(i, i + 4);
-    const { items } = await runActorBatch(slice);
-    starts++;
-    ads.push(...items);
+  const callAds = [];
+  const adCalls = new Map();   // ad_archive_id → Set(call index), across ALL calls
+  for (let ci = 0; ci < calls.length; ci++) {
+    const { items, ok } = await runActorBatch(calls[ci].terms);
+    callAds.push({ count: items.length, ok });
+    for (const it of items) {
+      if (it.ad_archive_id) (adCalls.get(it.ad_archive_id) || adCalls.set(it.ad_archive_id, new Set()).get(it.ad_archive_id)).add(ci);
+      ads.push({ ...it, _call: ci });
+    }
   }
   // the actor can return the same ad for overlapping terms
   const seenAd = new Set();
@@ -263,7 +355,8 @@ export async function runSource(targets, runState) {
     seenAd.add(k); return true;
   });
   m.ads_returned = uniqueAds.length;
-  m.apify_cost_usd = Number((uniqueAds.length * USD_PER_AD + starts * USD_PER_START).toFixed(5));
+  // Billed per ad RETURNED: an ad two calls both returned is charged twice.
+  m.apify_cost_usd = Number((ads.length * USD_PER_AD + calls.length * USD_PER_START).toFixed(5));
 
   // --- group into advertisers ----------------------------------------------
   const byAdvertiser = new Map();
@@ -283,9 +376,12 @@ export async function runSource(targets, runState) {
         phones: new Set(),
         is_whatsapp_cta: false,
         ad_start_date: null,
+        calls: new Set(),       // indices into `calls` that returned any of its ads
+        outcome: null,          // new | reseen | blocked | dropped — for per_call stats
       });
     }
     const a = byAdvertiser.get(key);
+    for (const ci of adCalls.get(it.ad_archive_id) || []) a.calls.add(ci);
     a.ad_count++;
     // collation_count = how many ads share this creative. Combined with the number
     // of distinct ads we sampled it is the best available repeat-spend proxy.
@@ -317,6 +413,7 @@ export async function runSource(targets, runState) {
     const probe = { name: a.name, categories: a.categories, creative_snippets: [...a.creative_snippets, ...a.bodies] };
     if (isHardBlocked(probe, '')) {
       m.icp_blocked++;
+      a.outcome = 'blocked';
       logger.info({ name: a.name }, 'ICP hard block — no row written');
       continue;
     }
@@ -326,7 +423,7 @@ export async function runSource(targets, runState) {
     if (a.is_whatsapp_cta) m.ctwa_advertisers++;
 
     a.ad_count_proxy = Math.max(a.ad_count, a.collation_max);
-    if (a.ad_count_proxy < ACTIVITY_MIN_ADS) { m.dropped_activity_gate++; continue; }
+    if (a.ad_count_proxy < ACTIVITY_MIN_ADS) { m.dropped_activity_gate++; a.outcome = 'dropped'; continue; }
 
     kept.push(a);
   }
@@ -378,7 +475,7 @@ export async function runSource(targets, runState) {
     const fitScore    = scoreFit(advertiser, '', sec.sector);
     const sizeScore   = scoreSize(a.ad_count_proxy);
     const status      = qualify(budgetScore, fitScore);
-    if (status === 'Dropped') continue;
+    if (status === 'Dropped') { a.outcome = 'dropped'; continue; }
 
     // Raw `phone` ONLY. phone_e164 is never set by this source.
     const phones = [...a.phones];
@@ -393,6 +490,7 @@ export async function runSource(targets, runState) {
       // because 'beauty_clinic' tokenises to ['beauty','clinic'], both blocked.
       if (existing?.sector && isHardBlocked({ name: existing.sector, categories: [], creative_snippets: [] }, '')) {
         m.icp_blocked_on_stored_sector++;
+        a.outcome = 'blocked';
         logger.info({ id: existing.id, sector: existing.sector, name: a.name }, 'existing lead is in a blocked sector — not enriched');
         continue;
       }
@@ -423,12 +521,15 @@ export async function runSource(targets, runState) {
         if (regraded) fields.status = regraded;
         await enrichExisting(existing.id, fields);
         m.leads_enriched++;
+        a.outcome = 'reseen';
       } else {
         await upsertLead({
           business_name: a.name,
           normalized_name: normalizeName(a.name),
           sector: sec.sector,
           discovery_source: 'ad_library_apify',
+          // The search term(s) that found it — one element = exact (migration 005).
+          discovery_terms: termsFor(a.calls, calls),
           status,
           running_ads: true,
           whatsapp_cta: a.is_whatsapp_cta ? true : null,
@@ -443,6 +544,7 @@ export async function runSource(targets, runState) {
           primary_hook: pickPrimaryHook({ discovery_source: 'ad_library' }),
         });
         m.leads_new++;
+        a.outcome = 'new';
       }
     } catch (err) {
       logger.error({ err: err.message, name: a.name }, 'write failed');
@@ -462,6 +564,10 @@ export async function runSource(targets, runState) {
     sector_llm_calls: sectorLlmCalls,
     sector_llm_cost_usd: Number(sectorLlmCost.toFixed(5)),
     icp_allowed_share: m.advertisers ? Number((m.icp_allowed / m.advertisers).toFixed(4)) : null,
+    ads_billed: ads.length,
+    // Per-term yield: which terms are thin (under the cap) and which are starved (hit it).
+    per_call: perCallStats(calls, callAds,
+      [...byAdvertiser.values()].map(a => ({ name: a.name, calls: a.calls, outcome: a.outcome, factory_named: factoryInName(a.name) }))),
   };
   await persist(supabase, m);
 
