@@ -20,6 +20,7 @@ import { upsertLead, enrichExisting, getClient } from '../lib/supabase.js';
 import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus } from '../scoring/dimensions.js';
 import { classifySector, factoryInName } from '../scoring/sector.js';
 import { haikuShort } from '../lib/claude.js';
+import { pageCritical } from '../lib/alert.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
 
@@ -250,29 +251,11 @@ async function monthToDateUsd() {
   return (data || []).reduce((s, r) => s + Number(r.apify_cost_usd || 0), 0);
 }
 
-async function page(subject, body) {
-  logger.error({ subject, body }, 'PAGE');
-  // Telegram is the intended critical transport but its bot token is still
-  // outstanding, so fall back to Whapi when this service has been given one.
-  // Absent both, the halt is still recorded in rana_v3_runs.halt_reason.
-  const token = process.env.WHAPI_TOKEN;
-  const phone = (process.env.YOUSIF_PHONE || '').replace(/^\+/, '');
-  if (!token || !phone) {
-    logger.error('PAGE not delivered — no WHAPI_TOKEN/YOUSIF_PHONE configured on rana-v3');
-    return false;
-  }
-  try {
-    const r = await fetch('https://gate.whapi.cloud/messages/text', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: phone, body: `🚨 ${subject}\n\n${body}` }),
-    });
-    if (!r.ok) { logger.error({ status: r.status }, 'PAGE send failed'); return false; }
-    return true;
-  } catch (e) {
-    logger.error({ err: e.message }, 'PAGE send threw');
-    return false;
-  }
+// Telegram first, WhatsApp copy, one alert_log row (lib/alert.js, msg-107 Fix 4).
+// The halt is also recorded in rana_v3_runs.halt_reason whatever happens here.
+async function page(subject, body, kind = 'apify_budget') {
+  const r = await pageCritical(subject, body, { kind });
+  return r.delivered;
 }
 
 // ---------------------------------------------------------------------------
