@@ -51,52 +51,68 @@ const BUDGET_ALERT_USD   = parseFloat(process.env.APIFY_BUDGET_ALERT_USD   || '4
 // `count: 30` caps a whole actor CALL, not each URL in it (actor input schema; the
 // per-URL cap is a separate `limitPerSource`). Measured 28-33 ads per 4-term call on
 // every night 09-25..09-30: four terms were sharing ~30 ads, so a term later in a
-// batch was starved, not thin. 33 = the observed max, used for budgeting.
+// batch was starved, not thin. The actor overshoots its cap by up to 3 (33 on a
+// 30 cap, the observed max) — budgeted on every call.
 const ADS_PER_CALL = 30;
-const ADS_PER_CALL_BUDGET = 33;
+const ADS_OVERSHOOT = 3;
 const TERMS_PER_BATCH = 4;
 
 // ---------------------------------------------------------------------------
-// call plan + term attribution (Yousif 2026-09-30)
+// call plan + term attribution (Yousif 2026-10-03)
 // ---------------------------------------------------------------------------
-// Factory terms get ONE CALL EACH — their own ~30-ad allowance — while
-// `factory_per_term_until` (targets.json, a UTC date, inclusive) has not passed.
-// It is a time-boxed test: 4 nights run every factory term twice, then the plan
-// falls back to 4-term batches on its own. APIFY_FACTORY_PER_TERM=false kills it
-// without a deploy. Kept off permanently for cost: see projectMonthUsd.
+// The 4-night per-term test (10-01..10-04) answered it: of the 8 factory terms only
+// مصنع بغداد and معمل بغداد hit the 30-ad cap (10-02: 30 ads each; معمل بغداد alone
+// gave 16 new names, 12 factory-named). The other 6 returned 0-12 ads per call —
+// thin, not starved. So, permanently:
+//   - `factory_solo_terms` get their OWN call with a larger allowance
+//     (`factory_solo_ads`, env APIFY_FACTORY_SOLO_ADS) — exact term attribution.
+//   - tonight's other factory terms share ONE batch of their own. Their measured
+//     sum is <=15 ads, half of a 30 cap, so nothing in it is starved. They are never
+//     mixed into a general batch: those hit the cap every night and would starve them.
+//   - the general terms stay in 4-term batches, unchanged.
+// There is no end date. APIFY_FACTORY_PER_TERM=false (the existing kill switch) puts
+// the solo terms back into the factory batch at 30 ads — the pre-test plan exactly.
 export function soloTermsTonight(targets, terms, now = new Date(), env = process.env) {
   if (env.APIFY_FACTORY_PER_TERM === 'false') return [];
-  const until = targets.factory_per_term_until;
-  if (!until || now.toISOString().slice(0, 10) > until) return [];
-  const factory = new Set(targets.factory_terms || []);
-  return terms.filter(t => factory.has(t));
+  const solo = new Set(targets.factory_solo_terms || []);
+  return terms.filter(t => solo.has(t));
 }
 
-export function planCalls(terms, soloTerms = []) {
+export function soloAdsAllowance(targets, env = process.env) {
+  const n = parseInt(env.APIFY_FACTORY_SOLO_ADS, 10) || targets.factory_solo_ads || ADS_PER_CALL;
+  return Math.max(ADS_PER_CALL, n);
+}
+
+/**
+ * @param terms        tonight's terms, in rotation order
+ * @param soloTerms    terms that get their own call
+ * @param opts.factory the factory term list — non-solo factory terms are batched apart
+ * @param opts.soloAds the solo calls' allowance (actor `count`)
+ * @returns [{terms, solo, ads}]  ads = the call's cap
+ */
+export function planCalls(terms, soloTerms = [], { factory = [], soloAds = ADS_PER_CALL } = {}) {
   const solo = new Set(soloTerms);
-  const calls = terms.filter(t => solo.has(t)).map(t => ({ terms: [t], solo: true }));
-  const rest = terms.filter(t => !solo.has(t));
-  for (let i = 0; i < rest.length; i += TERMS_PER_BATCH) calls.push({ terms: rest.slice(i, i + TERMS_PER_BATCH), solo: false });
+  const fac = new Set(factory);
+  const calls = terms.filter(t => solo.has(t)).map(t => ({ terms: [t], solo: true, ads: soloAds }));
+  const batch = (list) => {
+    for (let i = 0; i < list.length; i += TERMS_PER_BATCH) calls.push({ terms: list.slice(i, i + TERMS_PER_BATCH), solo: false, ads: ADS_PER_CALL });
+  };
+  batch(terms.filter(t => !solo.has(t) && fac.has(t)));
+  batch(terms.filter(t => !solo.has(t) && !fac.has(t)));
   return calls;
 }
 
-const callUsd = (nCalls) => nCalls * ADS_PER_CALL_BUDGET * USD_PER_AD + nCalls * USD_PER_START;
-export const estimateRunUsd = (calls) => callUsd(calls.length);
+const callUsd = (c) => ((c.ads ?? ADS_PER_CALL) + ADS_OVERSHOOT) * USD_PER_AD + USD_PER_START;
+// Worst case for one night: every call returns its cap plus the overshoot.
+export const estimateRunUsd = (calls) => calls.reduce((s, c) => s + callUsd(c), 0);
 
-// Month-end spend if every remaining night runs as planned: tonight included, test
-// nights at solo+batched calls, the rest batched. The old projection (month-to-date
-// ÷ day × days) would read a 4-night test as a month of it and page every night.
-export function projectMonthUsd({ mtd, now = new Date(), termsPerNight, factorySlots, until }) {
-  const batchedCalls = Math.ceil(termsPerNight / TERMS_PER_BATCH);
-  const testCalls = factorySlots + Math.ceil((termsPerNight - factorySlots) / TERMS_PER_BATCH);
-  const year = now.getUTCFullYear(), month = now.getUTCMonth();
-  const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  let usd = mtd;
-  for (let d = now.getUTCDate(); d <= last; d++) {
-    const date = new Date(Date.UTC(year, month, d)).toISOString().slice(0, 10);
-    usd += callUsd(until && date <= until ? testCalls : batchedCalls);
-  }
-  return usd;
+// Month-end spend if every remaining night (tonight included) runs at tonight's
+// worst case. Nights are symmetric by construction — 4 factory slots alternate the
+// two halves of factory_terms, each half holding exactly one solo term — so tonight's
+// plan prices every night (a test pins the symmetry).
+export function projectMonthUsd({ mtd, now = new Date(), nightUsd }) {
+  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
+  return mtd + (last - now.getUTCDate() + 1) * nightUsd;
 }
 
 // Which search term found an advertiser. A solo call names its term exactly, so if
@@ -118,7 +134,8 @@ export function perCallStats(calls, callAds, advertisers) {
     const names = (o) => mine.filter(a => a.outcome === o).map(a => a.name);
     return {
       terms: c.terms, solo: c.solo, ok: callAds[i].ok,
-      ads: callAds[i].count, hit_cap: callAds[i].count >= ADS_PER_CALL,
+      allowance: c.ads ?? ADS_PER_CALL,
+      ads: callAds[i].count, hit_cap: callAds[i].count >= (c.ads ?? ADS_PER_CALL),
       advertisers: mine.length,
       factory_named: mine.filter(a => a.factory_named).length,
       new: names('new'), reseen: names('reseen'),
@@ -179,14 +196,15 @@ async function apifyFetch(path, opts = {}) {
   return res;
 }
 
-async function runActorBatch(terms) {
+async function runActorBatch(terms, count = ADS_PER_CALL) {
   const memory = memoryForUrls(terms.length);
-  const maxItems = 30 * terms.length;
+  // maxItems must not undercut `count` on a 1-URL solo call with a larger allowance.
+  const maxItems = Math.max(30 * terms.length, count);
   const started = await apifyFetch(`/acts/${ACTOR}/runs?timeout=600&memory=${memory}&maxItems=${maxItems}`, {
     method: 'POST',
     body: JSON.stringify({
       urls: terms.map(t => ({ url: adLibraryUrl(t) })),
-      count: ADS_PER_CALL,
+      count,
       'scrapePageAds.activeStatus': 'active',
     }),
   });
@@ -304,18 +322,14 @@ export async function runSource(targets, runState) {
   m.icp_blocked_on_stored_sector = 0;
 
   const soloTerms = soloTermsTonight(targets, terms);
-  const calls = planCalls(terms, soloTerms);
+  const calls = planCalls(terms, soloTerms, { factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets) });
 
   // --- budget guard, BEFORE spending anything -------------------------------
   const mtd = await monthToDateUsd();
   const day = new Date().getUTCDate();
   const daysInMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 0)).getUTCDate();
   const estimateThisRun = estimateRunUsd(calls);
-  const projected = projectMonthUsd({
-    mtd, termsPerNight: terms.length,
-    factorySlots: Math.min(targets.factory_slots_per_night ?? 0, (targets.factory_terms || []).length),
-    until: soloTerms.length ? targets.factory_per_term_until : null,
-  });
+  const projected = projectMonthUsd({ mtd, nightUsd: estimateThisRun });
   m.month_to_date_usd = Number(mtd.toFixed(4));
   m.projected_month_usd = Number(projected.toFixed(4));
 
@@ -340,7 +354,7 @@ export async function runSource(targets, runState) {
   const callAds = [];
   const adCalls = new Map();   // ad_archive_id → Set(call index), across ALL calls
   for (let ci = 0; ci < calls.length; ci++) {
-    const { items, ok } = await runActorBatch(calls[ci].terms);
+    const { items, ok } = await runActorBatch(calls[ci].terms, calls[ci].ads);
     callAds.push({ count: items.length, ok });
     for (const it of items) {
       if (it.ad_archive_id) (adCalls.get(it.ad_archive_id) || adCalls.set(it.ad_archive_id, new Set()).get(it.ad_archive_id)).add(ci);
