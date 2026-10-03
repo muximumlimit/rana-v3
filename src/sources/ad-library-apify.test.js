@@ -122,6 +122,15 @@ test('BUDGET: a full October of the new plan, worst case, stays under the $5 hal
   const p = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1))) });
   assert.ok(p < 5, `projected $${p.toFixed(2)}`);
 });
+
+test('BUDGET: the default allowance (36, Yousif 2026-10-03) keeps a full 31-day month under the $4 alert — no nightly page', () => {
+  assert.equal(targetsJson.factory_solo_ads, 36);
+  const p = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1))) });
+  assert.ok(p < 4, `projected $${p.toFixed(2)} — over the $4 alert`);
+  // 60 was the first proposal: its worst case ($4.54 code, ~$5.13 real billing) runs into Apify's $5 hard limit.
+  const at60 = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1), { APIFY_FACTORY_SOLO_ADS: '60' })) });
+  assert.ok(at60 > 4);
+});
 import { isHardBlocked } from '../scoring/dimensions.js';
 
 // ---------------------------------------------------------------------------
