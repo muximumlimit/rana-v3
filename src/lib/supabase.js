@@ -2,9 +2,11 @@ import { createClient } from '@supabase/supabase-js';
 import logger from '../util/logger.js';
 
 let supabase;
+let rest;   // { url, key } for raw-fetch writes that must be confirmed
 
 export function init(url, key) {
   supabase = createClient(url, key);
+  rest = { url, key };
 }
 
 export function getClient() {
@@ -21,13 +23,28 @@ export async function upsertLead(lead) {
   return row;
 }
 
+// Confirmed enrich (msg-107 Fix 6). supabase-js .update() with no .select() returns no
+// rows, so a PATCH that matched nothing still counted as leads_enriched; and
+// .update().select() returns empty on Railway (rana-v2, 2026-06). Raw PATCH with
+// return=representation: exactly one row back, or it throws — the caller counts only
+// what resolves.
 export async function enrichExisting(id, enrichFields) {
-  const { error } = await supabase
-    .from('leads')
-    .update(enrichFields)
-    .eq('id', id);
-  if (error) throw new Error(`enrich failed: ${error.message}`);
-  logger.info({ id }, 'existing lead enriched');
+  const res = await fetch(`${rest.url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,enriched_at`, {
+    method: 'PATCH',
+    headers: {
+      apikey: rest.key, Authorization: `Bearer ${rest.key}`,
+      'Content-Type': 'application/json', Prefer: 'return=representation',
+    },
+    body: JSON.stringify(enrichFields),
+  });
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
+  if (!res.ok) throw new Error(`enrich failed: ${body?.message || text || `HTTP ${res.status}`}`);
+  const n = Array.isArray(body) ? body.length : 0;
+  if (n !== 1) throw new Error(`enrich unconfirmed: ${n} row(s) came back for id ${id}`);
+  logger.info({ id }, 'existing lead enriched (confirmed)');
+  return body[0];
 }
 
 function buildRow(lead) {

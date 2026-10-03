@@ -316,6 +316,7 @@ export async function runSource(targets, runState) {
   // not columns — carried in metadata jsonb so no migration is needed
   m.dropped_activity_gate = 0;
   m.icp_blocked_on_stored_sector = 0;
+  m.enrich_not_landed = 0;
 
   const soloTerms = soloTermsTonight(targets, terms);
   const calls = planCalls(terms, soloTerms, { factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets) });
@@ -557,6 +558,9 @@ export async function runSource(targets, runState) {
         a.outcome = 'new';
       }
     } catch (err) {
+      // An enrich that did not land is counted, never claimed (msg-107 Fix 6):
+      // leads_enriched++ only runs after enrichExisting() confirmed the row.
+      if (/^enrich (unconfirmed|failed)/.test(err.message)) m.enrich_not_landed++;
       logger.error({ err: err.message, name: a.name }, 'write failed');
     }
   }
@@ -565,6 +569,7 @@ export async function runSource(targets, runState) {
   m.metadata = {
     dropped_activity_gate: m.dropped_activity_gate,
     icp_blocked_on_stored_sector: m.icp_blocked_on_stored_sector,
+    enrich_not_landed: m.enrich_not_landed,   // attempted enriches that did not confirm
     activity_min_ads: ACTIVITY_MIN_ADS,
     phones_seen_all_advertisers: allPhonesSeen.length,
     phones_on_kept_advertisers: allPhones.length,
@@ -593,6 +598,7 @@ async function persist(supabase, m) {
     // these live in metadata, not as columns
     delete row.dropped_activity_gate;
     delete row.icp_blocked_on_stored_sector;
+    delete row.enrich_not_landed;
     const { error } = await supabase.from('rana_v3_runs').insert([row]);
     if (error) logger.error({ err: error.message }, 'rana_v3_runs insert failed');
   } catch (e) {
