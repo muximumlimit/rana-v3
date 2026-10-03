@@ -21,6 +21,7 @@ import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus
 import { classifySector, factoryInName } from '../scoring/sector.js';
 import { haikuShort } from '../lib/claude.js';
 import { pageCritical } from '../lib/alert.js';
+import { noteProviderStatus, resetProviderAuth } from '../lib/provider-auth.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
 
@@ -189,11 +190,12 @@ export function memoryForUrls(n) {
   return 512 * Math.pow(2, Math.floor(Math.log2(Math.max(1, n))));
 }
 
-async function apifyFetch(path, opts = {}) {
+export async function apifyFetch(path, opts = {}) {
   const res = await fetch(`${APIFY_BASE}${path}`, {
     ...opts,
     headers: { Authorization: `Bearer ${process.env.APIFY_API_TOKEN}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
   });
+  await noteProviderStatus('apify', res.status, `${opts.method || 'GET'} ${path.split('?')[0]}`);
   return res;
 }
 
@@ -239,11 +241,13 @@ async function monthToDateUsd() {
   const supabase = getClient();
   const start = new Date();
   start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from('rana_v3_runs')
     .select('apify_cost_usd')
     .gte('started_at', start.toISOString())
     .eq('source', 'ad_library_apify');
+  // The run's first DB call — a rejected service key shows up here every night.
+  await noteProviderStatus('supabase', status, 'month-to-date spend query');
   if (error) {
     logger.warn({ err: error.message }, 'month-to-date spend query failed — assuming 0');
     return 0;
@@ -261,7 +265,7 @@ async function page(subject, body, kind = 'apify_budget') {
 // ---------------------------------------------------------------------------
 // Whapi validation — a LOOKUP. POST /contacts sends nothing to anyone.
 // ---------------------------------------------------------------------------
-async function whapiValidate(phones) {
+export async function whapiValidate(phones) {
   const token = process.env.WHAPI_TOKEN;
   if (!token || !phones.length) return { checked: 0, valid: new Set() };
   const cap = parseInt(process.env.RANA_V3_WHAPI_CHECK_CAP || '160', 10);
@@ -276,6 +280,14 @@ async function whapiValidate(phones) {
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ contacts: [p], blocking: 'wait', force_check: false }),
         });
+        // Whapi answers a revoked/unknown token with 404 {"error":"Channel not found"}, not
+        // 401 (measured 2026-10-03) — treat that as the auth failure it is.
+        if (r.status === 404) {
+          const t = await r.text().catch(() => '');
+          if (/channel not found/i.test(t)) await noteProviderStatus('whapi', 401, 'POST /contacts → 404 "Channel not found" (token revoked or channel deleted)');
+          return;
+        }
+        await noteProviderStatus('whapi', r.status, 'POST /contacts (number lookup)');
         if (!r.ok) return;
         const j = await r.json();
         if (j?.contacts?.[0]?.status === 'valid') valid.add(p);
@@ -292,6 +304,7 @@ export async function runSource(targets, runState) {
   const supabase = getClient();
   const terms = targets.search_terms || [];
   const startedAt = new Date().toISOString();
+  resetProviderAuth();   // one 401/403 page per provider per run
 
   const m = {
     source: 'ad_library_apify', status: 'running', started_at: startedAt,

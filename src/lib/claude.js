@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import logger from '../util/logger.js';
+import { noteProviderStatus } from './provider-auth.js';
 
 let client;
 
@@ -47,11 +48,18 @@ function stripLoneSurrogates(str) {
 
 // Short single-answer Haiku call (sector classification). Returns text + cost.
 export async function haikuShort(prompt, maxTokens = 60) {
-  const msg = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: maxTokens,
-    messages: [{ role: 'user', content: stripLoneSurrogates(prompt) }],
-  });
+  let msg;
+  try {
+    msg = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: maxTokens,
+      messages: [{ role: 'user', content: stripLoneSurrogates(prompt) }],
+    });
+  } catch (err) {
+    // The sector classifier swallows this as 'llm_error'; a rejected key must still page.
+    await noteProviderStatus('anthropic', err?.status, 'haiku sector classification');
+    throw err;
+  }
   const inputTokens = msg.usage?.input_tokens ?? 0;
   const outputTokens = msg.usage?.output_tokens ?? 0;
   return {
@@ -70,16 +78,22 @@ export async function parseAdLibraryContent(markdown, html) {
   // Trim to 80k chars to stay within token budget, then strip lone surrogates.
   const trimmed = stripLoneSurrogates(content.slice(0, 80000));
 
-  const msg = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 4096,
-    messages: [
-      {
-        role: 'user',
-        content: `${PARSE_PROMPT}\n\n---\n${trimmed}`,
-      },
-    ],
-  });
+  let msg;
+  try {
+    msg = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'user',
+          content: `${PARSE_PROMPT}\n\n---\n${trimmed}`,
+        },
+      ],
+    });
+  } catch (err) {
+    await noteProviderStatus('anthropic', err?.status, 'haiku ad-library parse');
+    throw err;
+  }
 
   const text = msg.content[0]?.text || '[]';
   let advertisers = [];
