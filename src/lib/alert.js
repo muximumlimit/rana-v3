@@ -11,6 +11,7 @@
 // Env: TELEGRAM_ALERT_BOT_TOKEN + TELEGRAM_ALERT_CHAT_ID (never the lead-facing bot's
 // variable on lara-v2). Never throws.
 import logger from '../util/logger.js';
+import { truncateText } from '../util/text.js';
 
 const TG_API = 'https://api.telegram.org';
 
@@ -80,7 +81,8 @@ export async function pageCritical(subject, body = '', { kind = 'critical' } = {
   }
   await logAttempt({
     service: 'rana-v3', kind, delivered: telegram.sent, telegram: telegram.sent, whatsapp: whatsapp.sent,
-    reason: telegram.sent ? null : `telegram ${telegram.reason}`, text_head: text.slice(0, 200),
+    // Code-point safe (msg-116): alerts are full of emoji, and half of one fails the row.
+    reason: telegram.sent ? null : `telegram ${telegram.reason}`, text_head: truncateText(text, 200),
   });
   return { delivered: telegram.sent, telegram, whatsapp };
 }

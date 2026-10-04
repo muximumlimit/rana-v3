@@ -24,6 +24,7 @@ import { pageCritical } from '../lib/alert.js';
 import { noteProviderStatus, resetProviderAuth } from '../lib/provider-auth.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
+import { truncateText } from '../util/text.js';
 
 const ACTOR = 'curious_coder~facebook-ads-library-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
@@ -142,8 +143,31 @@ export function perCallStats(calls, callAds, advertisers) {
       factory_named: mine.filter(a => a.factory_named).length,
       new: names('new'), reseen: names('reseen'),
       blocked: names('blocked').length, dropped: names('dropped').length,
+      write_failed: names('write_failed'),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// write failures (msg-116): counted by kind, and paged once per run
+// ---------------------------------------------------------------------------
+export function classifyWriteError(err) {
+  const msg = String(err?.message ?? err);
+  if (/^enrich (unconfirmed|failed)/.test(msg)) return 'enrich_not_landed';
+  if (/^insert failed/.test(msg)) return 'insert_failed';
+  return 'write_error';
+}
+
+/** One page per run if any write did not land. Never throws. */
+export async function reportWriteFailures(m, page) {
+  const total = (m.insert_failed || 0) + (m.write_errors || 0) + (m.enrich_not_landed || 0);
+  if (!total) return null;
+  const lines = (m.write_failures || []).slice(0, 15).map(f => `• ${f.name} — ${f.kind}: ${f.err}`);
+  try {
+    return await page(`rana-v3: ${total} write(s) did not land`,
+      `new leads lost ${m.insert_failed || 0} · enrich not landed ${m.enrich_not_landed || 0} · other ${m.write_errors || 0}\n${lines.join('\n')}`,
+      { kind: 'write_failed' });
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +341,9 @@ export async function runSource(targets, runState) {
   m.dropped_activity_gate = 0;
   m.icp_blocked_on_stored_sector = 0;
   m.enrich_not_landed = 0;
+  m.insert_failed = 0;
+  m.write_errors = 0;
+  m.write_failures = [];
 
   const soloTerms = soloTermsTonight(targets, terms);
   const calls = planCalls(terms, soloTerms, { factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets) });
@@ -404,7 +431,8 @@ export async function runSource(targets, runState) {
     const body = it.snapshot?.body?.text || '';
     if (body) {
       a.bodies.push(body);
-      if (a.creative_snippets.length < 3) a.creative_snippets.push(body.slice(0, 100));
+      // Code-point safe (msg-116): slice(0, 100) cut emoji in half and lost 7 inserts.
+      if (a.creative_snippets.length < 3) a.creative_snippets.push(truncateText(body, 100));
     }
     for (const p of extractPhones(body)) a.phones.add(p);
     if (it.start_date_formatted && !a.ad_start_date) a.ad_start_date = it.start_date_formatted.slice(0, 10);
@@ -545,7 +573,7 @@ export async function runSource(targets, runState) {
           running_ads: true,
           whatsapp_cta: a.is_whatsapp_cta ? true : null,
           ad_count: a.ad_count_proxy,
-          ad_creative_urls: a.creative_snippets.map(s => String(s).slice(0, 500)),
+          ad_creative_urls: a.creative_snippets.map(s => truncateText(s, 500)),
           ad_start_date: a.ad_start_date,
           facebook_page_id: a.facebook_page_id,
           facebook_page_url: a.facebook_page_url,
@@ -560,16 +588,27 @@ export async function runSource(targets, runState) {
     } catch (err) {
       // An enrich that did not land is counted, never claimed (msg-107 Fix 6):
       // leads_enriched++ only runs after enrichExisting() confirmed the row.
-      if (/^enrich (unconfirmed|failed)/.test(err.message)) m.enrich_not_landed++;
-      logger.error({ err: err.message, name: a.name }, 'write failed');
+      // A new lead that did not land is counted too (msg-116): leads_new excludes it,
+      // so without insert_failed the run reported success over lost rows.
+      const kind = classifyWriteError(err);
+      if (kind === 'enrich_not_landed') m.enrich_not_landed++;
+      else if (kind === 'insert_failed') m.insert_failed++;
+      else m.write_errors++;
+      m.write_failures.push({ name: a.name, kind, err: err.message });
+      a.outcome = 'write_failed';
+      logger.error({ err: err.message, name: a.name, kind }, 'write failed');
     }
   }
+  await reportWriteFailures(m, pageCritical);
 
   m.status = 'success';
   m.metadata = {
     dropped_activity_gate: m.dropped_activity_gate,
     icp_blocked_on_stored_sector: m.icp_blocked_on_stored_sector,
     enrich_not_landed: m.enrich_not_landed,   // attempted enriches that did not confirm
+    insert_failed: m.insert_failed,           // new leads that did not land (msg-116)
+    write_errors: m.write_errors,             // any other write-path failure
+    write_failures: m.write_failures,         // [{name, kind, err}] — what was lost and why
     activity_min_ads: ACTIVITY_MIN_ADS,
     phones_seen_all_advertisers: allPhonesSeen.length,
     phones_on_kept_advertisers: allPhones.length,
@@ -599,6 +638,9 @@ async function persist(supabase, m) {
     delete row.dropped_activity_gate;
     delete row.icp_blocked_on_stored_sector;
     delete row.enrich_not_landed;
+    delete row.insert_failed;
+    delete row.write_errors;
+    delete row.write_failures;
     const { error } = await supabase.from('rana_v3_runs').insert([row]);
     if (error) logger.error({ err: error.message }, 'rana_v3_runs insert failed');
   } catch (e) {

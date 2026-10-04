@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import logger from '../util/logger.js';
 import { noteProviderStatus } from './provider-auth.js';
+import { stripLoneSurrogates } from '../util/text.js';
 
 let client;
 
@@ -39,12 +40,7 @@ Return ONLY valid JSON. No prose. If no advertisers found, return [].`;
 // as bare \uD8xx, which Anthropic's server-side JSON parser rejects with a 400
 // "no low surrogate in string". Strip any surrogate code unit that isn't part of
 // a valid high+low pair before sending.
-function stripLoneSurrogates(str) {
-  return str.replace(
-    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
-    '',
-  );
-}
+// (Shared with the DB write path since msg-116 — src/util/text.js.)
 
 // Short single-answer Haiku call (sector classification). Returns text + cost.
 export async function haikuShort(prompt, maxTokens = 60) {

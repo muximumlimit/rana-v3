@@ -1,6 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, projectMonthUsd, termsFor, perCallStats } from './ad-library-apify.js';
+import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, projectMonthUsd, termsFor, perCallStats, classifyWriteError, reportWriteFailures } from './ad-library-apify.js';
+
+// ── msg-116 #1: a new lead that did not land is counted and pages ─────────────────
+// 10-01..10-04: 7 inserts failed, logged once each, counted by nothing; every run
+// said success with leads_new excluding them.
+test('classifyWriteError: insert vs enrich vs anything else', () => {
+  assert.equal(classifyWriteError(new Error('insert failed: invalid input syntax for type json')), 'insert_failed');
+  assert.equal(classifyWriteError(new Error('enrich unconfirmed: 0 row(s) came back for id x')), 'enrich_not_landed');
+  assert.equal(classifyWriteError(new Error('enrich failed: HTTP 500')), 'enrich_not_landed');
+  assert.equal(classifyWriteError(new Error('findExisting: timeout')), 'write_error');
+});
+
+test('INTENT: any failed write pages ONCE per run, naming the leads and the error', async () => {
+  const pages = [];
+  const page = async (subject, body) => { pages.push({ subject, body }); return { delivered: true }; };
+  const m = { insert_failed: 2, write_errors: 1, enrich_not_landed: 0,
+    write_failures: [{ name: 'شركة الرضوان العالميه', kind: 'insert_failed', err: 'insert failed: invalid input syntax for type json' },
+      { name: 'تجهيزات تازة الغذائية', kind: 'insert_failed', err: 'insert failed: invalid input syntax for type json' },
+      { name: 'X', kind: 'write_error', err: 'findExisting: timeout' }] };
+  await reportWriteFailures(m, page);
+  assert.equal(pages.length, 1);
+  assert.match(pages[0].subject, /3 write\(s\) did not land/);
+  assert.match(pages[0].body, /الرضوان/);
+  assert.match(pages[0].body, /invalid input syntax for type json/);
+});
+
+test('a clean run pages nothing', async () => {
+  const pages = [];
+  await reportWriteFailures({ insert_failed: 0, write_errors: 0, enrich_not_landed: 0, write_failures: [] }, async (s) => { pages.push(s); });
+  assert.equal(pages.length, 0);
+});
 import { tonightsTerms } from '../pipeline.js';
 import targetsJson from '../../config/targets.json' with { type: 'json' };
 
