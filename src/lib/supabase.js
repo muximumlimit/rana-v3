@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import logger from '../util/logger.js';
+import { stripLoneSurrogates } from '../util/text.js';
 
 let supabase;
 let rest;   // { url, key } for raw-fetch writes that must be confirmed
@@ -47,7 +48,17 @@ export async function enrichExisting(id, enrichFields) {
   return body[0];
 }
 
+// The write boundary (msg-116): PostgREST hands this body to Postgres as json, and one
+// unpaired surrogate half anywhere in it fails the whole insert. Every truncation upstream
+// is code-point safe now; this is the backstop for the text we did not cut ourselves.
+const clean = (v) => (typeof v === 'string' ? stripLoneSurrogates(v)
+  : Array.isArray(v) ? v.map(clean) : v);
+
 function buildRow(lead) {
+  return Object.fromEntries(Object.entries(rawRow(lead)).map(([k, v]) => [k, clean(v)]));
+}
+
+function rawRow(lead) {
   return {
     business_name:        lead.business_name,
     normalized_name:      lead.normalized_name,

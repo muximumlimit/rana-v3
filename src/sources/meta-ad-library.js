@@ -6,6 +6,7 @@ import { isHardBlocked, scoreBudget, scoreFit, scoreSize, qualify, regradeStatus
 import { classifySectorDeterministic } from '../scoring/sector.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
+import { truncateText } from '../util/text.js';
 
 // Activity gate v1 proxy: minimum simultaneous active ads to qualify as
 // "invested in marketing." Per-ad recency check (start_date) added in
@@ -183,7 +184,7 @@ export async function runSource(targets, runState) {
         status,
         running_ads:       true,
         ad_count:          advertiser.ad_count ?? null,
-        ad_creative_urls:  (advertiser.creative_snippets ?? []).map(s => String(s).slice(0, 500)),
+        ad_creative_urls:  (advertiser.creative_snippets ?? []).map(s => truncateText(s, 500)),
         facebook_page_id:  advertiser.facebook_page_id ?? null,
         facebook_page_url: advertiser.facebook_page_url ?? null,
         whatsapp_cta:      ctwa,
