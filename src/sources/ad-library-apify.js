@@ -70,10 +70,8 @@ const TERMS_PER_BATCH = 4;
 // thin, not starved. So, permanently:
 //   - `factory_solo_terms` get their OWN call with a larger allowance
 //     (`factory_solo_ads`, env APIFY_FACTORY_SOLO_ADS) — exact term attribution.
-//   - tonight's other factory terms share ONE batch of their own. Their measured
-//     sum is <=15 ads, half of a 30 cap, so nothing in it is starved. They are never
-//     mixed into a general batch: those hit the cap every night and would starve them.
-//   - the general terms stay in 4-term batches, unchanged.
+//   - since msg-124 every other term (factory or general) also gets its own call, at
+//     term_ads — see planCalls below. Batches are only the APIFY_BATCH_TERMS fallback.
 // There is no end date. APIFY_FACTORY_PER_TERM=false (the existing kill switch) puts
 // the solo terms back into the factory batch at 30 ads — the pre-test plan exactly.
 export function soloTermsTonight(targets, terms, now = new Date(), env = process.env) {
@@ -87,22 +85,37 @@ export function soloAdsAllowance(targets, env = process.env) {
   return Math.max(ADS_PER_CALL, n);
 }
 
+// Every term its own call (msg-124 #2c, Yousif 2026-10-08). `count` caps a whole call,
+// so in a 4-term batch one busy term ate the cap and its batch-mates got nothing: 22 of
+// 22 general batches hit 30 on 10-01..10-08, and 27 term-nights returned 0 ads for that
+// reason alone (result-123 #2). An extra call costs one actor start, $0.00005.
+// Allowances: the 2 solo factory terms keep factory_solo_ads (36); every other term gets
+// term_ads (env APIFY_TERM_ADS), sized so a typical night stays inside $0.16 once Apify's
+// cycle resets. APIFY_BATCH_TERMS=true restores the old 4-term batches exactly.
+export function termAdsAllowance(targets, env = process.env) {
+  const n = parseInt(env.APIFY_TERM_ADS, 10) || targets.term_ads || ADS_PER_CALL;
+  return Math.min(100, Math.max(5, n));
+}
+
 /**
- * @param terms        tonight's terms, in rotation order
- * @param soloTerms    terms that get their own call
- * @param opts.factory the factory term list — non-solo factory terms are batched apart
- * @param opts.soloAds the solo calls' allowance (actor `count`)
+ * @param terms          tonight's terms, in rotation order
+ * @param soloTerms      factory terms with the larger allowance
+ * @param opts.factory   the factory term list
+ * @param opts.soloAds   the solo calls' allowance (actor `count`)
+ * @param opts.termAds   every other call's allowance
+ * @param opts.batch     true → the pre-msg-124 plan: non-solo terms in 4-term batches at 30
  * @returns [{terms, solo, ads}]  ads = the call's cap
  */
-export function planCalls(terms, soloTerms = [], { factory = [], soloAds = ADS_PER_CALL } = {}) {
+export function planCalls(terms, soloTerms = [], { factory = [], soloAds = ADS_PER_CALL, termAds = ADS_PER_CALL, batch = false } = {}) {
   const solo = new Set(soloTerms);
   const fac = new Set(factory);
   const calls = terms.filter(t => solo.has(t)).map(t => ({ terms: [t], solo: true, ads: soloAds }));
-  const batch = (list) => {
+  const add = (list) => {
+    if (!batch) { for (const t of list) calls.push({ terms: [t], solo: false, ads: termAds }); return; }
     for (let i = 0; i < list.length; i += TERMS_PER_BATCH) calls.push({ terms: list.slice(i, i + TERMS_PER_BATCH), solo: false, ads: ADS_PER_CALL });
   };
-  batch(terms.filter(t => !solo.has(t) && fac.has(t)));
-  batch(terms.filter(t => !solo.has(t) && !fac.has(t)));
+  add(terms.filter(t => !solo.has(t) && fac.has(t)));
+  add(terms.filter(t => !solo.has(t) && !fac.has(t)));
   return calls;
 }
 
@@ -354,7 +367,10 @@ export async function runSource(targets, runState) {
   m.write_failures = [];
 
   const soloTerms = soloTermsTonight(targets, terms);
-  const calls = planCalls(terms, soloTerms, { factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets) });
+  const calls = planCalls(terms, soloTerms, {
+    factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets),
+    termAds: termAdsAllowance(targets), batch: process.env.APIFY_BATCH_TERMS === 'true',
+  });
 
   // --- budget guard, BEFORE spending anything -------------------------------
   // On Apify's billing cycle (msg-124 #2a). month_to_date_usd / projected_month_usd keep

@@ -9,12 +9,12 @@ const targets = JSON.parse(readFileSync(new URL('../config/targets.json', import
 // Continuous day numbers around today (2026-09-29 ≈ epoch day 20725), across a month end.
 const TODAY = 20725;
 
-test('INTENT: every night runs exactly 4 factory terms + 11 others, 15 total, no duplicates', () => {
+test('INTENT: every night runs exactly 3 factory terms + 12 others, 15 total, no duplicates (msg-124)', () => {
   for (let day = TODAY; day < TODAY + 62; day++) {
     const t = tonightsTerms(targets, 15, day);
     assert.equal(t.length, 15, `day ${day}`);
     assert.equal(new Set(t).size, 15, `day ${day}: duplicate term`);
-    assert.equal(t.filter(x => targets.factory_terms.includes(x)).length, 4, `day ${day}: factory slots`);
+    assert.equal(t.filter(x => targets.factory_terms.includes(x)).length, 3, `day ${day}: factory slots`);
   }
 });
 
@@ -25,7 +25,7 @@ test('every factory term runs within ANY 2 consecutive nights — month ends inc
   }
 });
 
-test('the other 28 terms still all get covered (every 3 nights), none dropped', () => {
+test('the other 29 terms still all get covered (every 3 nights), none dropped', () => {
   for (let from = TODAY; from < TODAY + 31; from++) {
     const seen = new Set();
     for (let day = from; day < from + 3; day++) tonightsTerms(targets, 15, day).forEach(t => seen.add(t));
@@ -35,7 +35,7 @@ test('the other 28 terms still all get covered (every 3 nights), none dropped', 
 
 test('the factory list and the general list do not overlap (no term runs twice a night)', () => {
   assert.equal(targets.factory_terms.filter(f => targets.search_terms.includes(f)).length, 0);
-  assert.equal(targets.factory_terms.length, 8);
+  assert.equal(targets.factory_terms.length, 6);   // msg-124: the 2 empty factory terms dropped
 });
 
 test('no factory config → behaves exactly like the old single window', () => {

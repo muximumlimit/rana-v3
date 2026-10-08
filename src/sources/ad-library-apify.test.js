@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, termsFor, perCallStats, classifyWriteError, reportWriteFailures, cycleSpend } from './ad-library-apify.js';
+import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, termAdsAllowance, termsFor, perCallStats, classifyWriteError, reportWriteFailures, cycleSpend } from './ad-library-apify.js';
 
 // ── msg-116 #1: a new lead that did not land is counted and pages ─────────────────
 // 10-01..10-04: 7 inserts failed, logged once each, counted by nothing; every run
@@ -35,45 +35,56 @@ import { tonightsTerms } from '../pipeline.js';
 import targetsJson from '../../config/targets.json' with { type: 'json' };
 
 // ---------------------------------------------------------------------------
-// factory call plan + term attribution (Yousif 2026-10-03)
+// call plan (Yousif 2026-10-03, rebuilt msg-124 #2b/c/d 2026-10-08)
 // ---------------------------------------------------------------------------
 const oct = (d) => new Date(`2026-10-${String(d).padStart(2, '0')}T02:00:00Z`);
 const epochDay = (d) => Math.floor(d.getTime() / 86_400_000);
 const planFor = (date, env = {}) => {
   const terms = tonightsTerms(targetsJson, 15, epochDay(date));
-  return planCalls(terms, soloTermsTonight(targetsJson, terms, date, env),
-    { factory: targetsJson.factory_terms, soloAds: soloAdsAllowance(targetsJson, env) });
+  return planCalls(terms, soloTermsTonight(targetsJson, terms, date, env), {
+    factory: targetsJson.factory_terms, soloAds: soloAdsAllowance(targetsJson, env),
+    termAds: termAdsAllowance(targetsJson, env), batch: env.APIFY_BATCH_TERMS === 'true',
+  });
 };
-const THIN = targetsJson.factory_terms.filter(t => !targetsJson.factory_solo_terms.includes(t));
+const ALL = [...targetsJson.factory_terms, ...targetsJson.search_terms];
 
-test('INTENT: only مصنع بغداد and معمل بغداد are solo — the 6 thin factory terms are never widened', () => {
-  assert.deepEqual(targetsJson.factory_solo_terms, ['مصنع بغداد', 'معمل بغداد']);
-  assert.equal(THIN.length, 6);
+test('INTENT (msg-124 #2b): the dead and empty terms are gone', () => {
+  // ads every night, 0 new leads in 8 nights (result-123 #2)
+  for (const t of ['مطعم بغداد', 'كافيه بغداد', 'كوفي شوب بغداد', 'سوبرماركت بغداد', 'مواد تنظيف بغداد', 'restaurant Baghdad', 'jewelry Baghdad',
+    // Meta returned nothing, 4 of 4 nights
+    'مصنع مواد غذائية بغداد', 'مصنع مواد بناء بغداد']) assert.ok(!ALL.includes(t), `${t} is still in rotation`);
+});
+
+test('INTENT (msg-124 #2d): the 4 uncovered ICP sectors each have terms — all probed 2026-10-08', () => {
+  const sectors = {
+    furniture_home: ['اثاث بغداد', 'معرض اثاث بغداد'],                 // 8 / 19 new advertisers with a phone
+    electronics_appliances: ['اجهزة كهربائية بغداد', 'اجهزة منزلية بغداد'], // 9 / 5
+    construction_materials: ['مواد بناء بغداد', 'مواد انشائية بغداد'],   // 17 / 2
+    travel_tourism: ['سفر وسياحة بغداد', 'شركة سياحة بغداد'],          // 5 / 9
+  };
+  for (const [s, terms] of Object.entries(sectors)) for (const t of terms) assert.ok(targetsJson.search_terms.includes(t), `${s}: ${t} missing`);
+  assert.equal(new Set(ALL).size, ALL.length, 'no term listed twice');
+});
+
+test('INTENT (msg-124 #2c): every term gets its own call — nothing is crowded out of a shared cap', () => {
   for (let d = 1; d <= 31; d++) {
-    for (const c of planFor(oct(d)).filter(c => c.solo)) assert.ok(targetsJson.factory_solo_terms.includes(c.terms[0]), `oct ${d}: ${c.terms[0]} went solo`);
+    const calls = planFor(oct(d));
+    assert.equal(calls.length, 15, `oct ${d}`);
+    assert.ok(calls.every(c => c.terms.length === 1), `oct ${d}: a call carries more than one term`);
+    assert.equal(new Set(calls.flatMap(c => c.terms)).size, 15, 'every term runs exactly once');
+    const solo = calls.filter(c => c.solo);
+    assert.equal(solo.length, 1, `oct ${d}: exactly one solo factory term`);
+    assert.equal(calls.filter(c => targetsJson.factory_terms.includes(c.terms[0])).length, 3, 'factory slots');
   }
 });
 
-test('INTENT: a solo term gets the larger allowance; every batch keeps 30', () => {
-  const calls = planFor(oct(2));
-  const solo = calls.filter(c => c.solo);
-  assert.equal(solo.length, 1);
-  assert.equal(solo[0].ads, targetsJson.factory_solo_ads);
-  assert.ok(targetsJson.factory_solo_ads > 30);
-  for (const c of calls.filter(c => !c.solo)) assert.equal(c.ads, 30);
-});
-
-test('INTENT: every night = 1 solo + 1 batch of the 3 thin factory terms + the 3 unchanged general batches', () => {
+test('INTENT: only مصنع بغداد and معمل بغداد are solo, at 36; every other call gets term_ads', () => {
+  assert.deepEqual(targetsJson.factory_solo_terms, ['مصنع بغداد', 'معمل بغداد']);
   for (let d = 1; d <= 31; d++) {
-    const calls = planFor(oct(d));
-    assert.equal(calls.length, 5, `oct ${d}`);
-    const [solo, thin, ...general] = calls;
-    assert.equal(solo.solo, true);
-    assert.equal(thin.terms.length, 3);
-    assert.ok(thin.terms.every(t => THIN.includes(t)), `oct ${d}: thin batch mixes in ${thin.terms}`);
-    assert.deepEqual(general.map(c => c.terms.length), [4, 4, 3]);
-    assert.ok(general.every(c => c.terms.every(t => !targetsJson.factory_terms.includes(t))), 'a factory term was put in a general batch — it would be starved');
-    assert.equal(new Set(calls.flatMap(c => c.terms)).size, 15, 'every term runs exactly once');
+    for (const c of planFor(oct(d))) {
+      if (c.solo) { assert.ok(targetsJson.factory_solo_terms.includes(c.terms[0])); assert.equal(c.ads, 36); }
+      else assert.equal(c.ads, targetsJson.term_ads);
+    }
   }
 });
 
@@ -84,23 +95,29 @@ test('INTENT: each solo term runs every 2nd night — they alternate, never the 
   }
 });
 
-test('INTENT: the plan has no end date, and the kill switch restores the pre-test plan exactly', () => {
-  const nov = new Date('2026-11-20T02:00:00Z');
-  assert.equal(planFor(nov).filter(c => c.solo).length, 1, 'still solo after the old 10-04 test end');
-  const killed = planFor(oct(2), { APIFY_FACTORY_PER_TERM: 'false' });
-  assert.deepEqual(killed.map(c => [c.terms.length, c.solo, c.ads]), [[4, false, 30], [4, false, 30], [4, false, 30], [3, false, 30]]);
-  assert.ok(killed[0].terms.every(t => targetsJson.factory_terms.includes(t)), 'killed: the 4 factory terms share one batch, as before the test');
+test('INTENT: APIFY_BATCH_TERMS=true restores the 4-term batches at 30 exactly', () => {
+  const calls = planFor(oct(2), { APIFY_BATCH_TERMS: 'true' });
+  const [solo, ...rest] = calls;
+  assert.equal(solo.solo, true);
+  assert.deepEqual(rest.map(c => [c.terms.length, c.ads]), [[2, 30], [4, 30], [4, 30], [4, 30]]);
 });
 
-test('allowance: env overrides config, and never drops below the batch cap', () => {
+test('allowance: env overrides config; solo never below the batch cap; term_ads bounded 5..100', () => {
   assert.equal(soloAdsAllowance(targetsJson, {}), targetsJson.factory_solo_ads);
   assert.equal(soloAdsAllowance(targetsJson, { APIFY_FACTORY_SOLO_ADS: '75' }), 75);
   assert.equal(soloAdsAllowance(targetsJson, { APIFY_FACTORY_SOLO_ADS: '10' }), 30);
   assert.equal(soloAdsAllowance({}, {}), 30);
+  assert.equal(termAdsAllowance(targetsJson, {}), 15);
+  assert.equal(termAdsAllowance(targetsJson, { APIFY_TERM_ADS: '25' }), 25);
+  assert.equal(termAdsAllowance(targetsJson, { APIFY_TERM_ADS: '1' }), 5);
+  assert.equal(termAdsAllowance({}, {}), 30);
 });
 
-test('planCalls with no solo and no factory list is the old plan', () => {
-  assert.deepEqual(planCalls(['a', 'b', 'c', 'd', 'e']), [
+test('planCalls: one call per term by default; batch:true is the old plan', () => {
+  assert.deepEqual(planCalls(['a', 'b'], [], { termAds: 15 }), [
+    { terms: ['a'], solo: false, ads: 15 }, { terms: ['b'], solo: false, ads: 15 },
+  ]);
+  assert.deepEqual(planCalls(['a', 'b', 'c', 'd', 'e'], [], { batch: true }), [
     { terms: ['a', 'b', 'c', 'd'], solo: false, ads: 30 },
     { terms: ['e'], solo: false, ads: 30 },
   ]);
@@ -138,8 +155,8 @@ test('INTENT: hit_cap is measured against the call\'s OWN allowance — 30 ads o
 
 test('BUDGET: a night is priced at every call\'s cap + 3 overshoot, per call', () => {
   const night = planFor(oct(2));
-  const ads = 1 * (targetsJson.factory_solo_ads + 3) + 4 * 33;
-  assert.ok(Math.abs(estimateRunUsd(night) - (ads * 0.00075 + 5 * 0.00005)) < 1e-9);
+  const ads = 1 * (targetsJson.factory_solo_ads + 3) + 14 * (targetsJson.term_ads + 3);
+  assert.ok(Math.abs(estimateRunUsd(night) - (ads * 0.00075 + 15 * 0.00005)) < 1e-9);
 });
 
 test('BUDGET: nights are symmetric, so tonight prices the cycle', () => {
@@ -169,9 +186,34 @@ test('INTENT: if Apify does not answer, the cycle comes from the 18th and rana_v
   assert.ok(Math.abs(c.spent - 0.80) < 1e-9, 'the 09-17 run belongs to the previous cycle');
 });
 
-test('BUDGET: a full 31-night cycle of the plan, worst case, stays under the $5 limit', () => {
-  const p = 31 * estimateRunUsd(planFor(oct(1)));
-  assert.ok(p < 5, `projected $${p.toFixed(2)}`);
+// msg-124: worst case must fit the headroom left before Apify's 10-17 reset ($3.26 / 9
+// nights = $0.36); a TYPICAL night must fit $0.16 (the $5 cycle / 30). Worst case after
+// the reset does not fit $0.16 — the cycle guard halts on that, it never overspends.
+test('BUDGET: worst-case night fits the pre-reset headroom ($0.36)', () => {
+  for (let d = 1; d <= 31; d++) assert.ok(estimateRunUsd(planFor(oct(d))) <= 0.36, `oct ${d}: $${estimateRunUsd(planFor(oct(d))).toFixed(3)}`);
+});
+
+// Uncontested supply per term, measured (result-123 #2 per-term table: the best night's
+// ads for existing terms; the 2026-10-08 probe for the 8 new ones; the factory batch's
+// exact per-night means for the thin factory terms). Billing is per ad RETURNED.
+const MEASURED_ADS = {
+  'مصنع بغداد': 36, 'معمل بغداد': 36, 'مصنع اثاث بغداد': 0.4, 'معمل بلاستيك بغداد': 2.3, 'معمل حلويات بغداد': 9, 'ورشة تصنيع بغداد': 1.3,
+  'مطعم راقي بغداد': 9, 'تجهيزات مطاعم بغداد': 8, 'fashion Baghdad': 13, 'boutique Baghdad': 17, 'بوتيك بغداد': 30, 'ملابس بغداد': 13,
+  'مجوهرات بغداد': 13, 'عبايات بغداد': 30, 'مواد غذائية بغداد': 12, 'توزيع بغداد': 25, 'جملة بغداد': 12, 'شركة توزيع بغداد': 30,
+  'hotel Baghdad': 18, 'فندق بغداد': 19, 'علامة تجارية بغداد': 23, 'خدمات شركات بغداد': 29, 'ديكور بغداد': 26, 'دعاية واعلان بغداد': 7,
+  'مطبعة بغداد': 13, 'سيارات بغداد': 30, 'معرض سيارات بغداد': 23,
+  'اثاث بغداد': 30, 'معرض اثاث بغداد': 30, 'اجهزة كهربائية بغداد': 30, 'اجهزة منزلية بغداد': 28, 'مواد بناء بغداد': 26,
+  'مواد انشائية بغداد': 3, 'سفر وسياحة بغداد': 5, 'شركة سياحة بغداد': 30,
+};
+
+test('BUDGET: a typical night, on measured supply, fits $0.16', () => {
+  assert.deepEqual(Object.keys(MEASURED_ADS).sort(), [...targetsJson.factory_terms, ...targetsJson.search_terms].sort(), 'every term has a measured supply');
+  let total = 0;
+  for (let d = 1; d <= 30; d++) {
+    total += planFor(oct(d)).reduce((s, c) => s + Math.min(MEASURED_ADS[c.terms[0]], c.ads) * 0.00075 + 0.00005, 0);
+  }
+  const avg = total / 30;
+  assert.ok(avg <= 0.16, `typical night $${avg.toFixed(3)}`);
 });
 import { isHardBlocked } from '../scoring/dimensions.js';
 
