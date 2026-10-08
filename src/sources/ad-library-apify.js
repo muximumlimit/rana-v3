@@ -25,6 +25,7 @@ import { noteProviderStatus, resetProviderAuth } from '../lib/provider-auth.js';
 import { pickPrimaryHook } from '../scoring/primary-hook.js';
 import logger from '../util/logger.js';
 import { truncateText } from '../util/text.js';
+import { DEFAULT_CYCLE_START_DAY, cycleBounds, nightsLeftInCycle, budgetCheck, readApifyCycle } from '../lib/apify-cycle.js';
 
 const ACTOR = 'curious_coder~facebook-ads-library-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
@@ -109,14 +110,6 @@ const callUsd = (c) => ((c.ads ?? ADS_PER_CALL) + ADS_OVERSHOOT) * USD_PER_AD + 
 // Worst case for one night: every call returns its cap plus the overshoot.
 export const estimateRunUsd = (calls) => calls.reduce((s, c) => s + callUsd(c), 0);
 
-// Month-end spend if every remaining night (tonight included) runs at tonight's
-// worst case. Nights are symmetric by construction — 4 factory slots alternate the
-// two halves of factory_terms, each half holding exactly one solo term — so tonight's
-// plan prices every night (a test pins the symmetry).
-export function projectMonthUsd({ mtd, now = new Date(), nightUsd }) {
-  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
-  return mtd + (last - now.getUTCDate() + 1) * nightUsd;
-}
 
 // Which search term found an advertiser. A solo call names its term exactly, so if
 // any solo call returned it, those terms are the answer. Otherwise it came only from
@@ -259,24 +252,39 @@ async function runActorBatch(terms, count = ADS_PER_CALL) {
 }
 
 // ---------------------------------------------------------------------------
-// budget guard
+// budget guard — on Apify's billing cycle, not the calendar month (msg-124 #2a)
 // ---------------------------------------------------------------------------
-async function monthToDateUsd() {
-  const supabase = getClient();
-  const start = new Date();
-  start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
+const CYCLE_START_DAY = parseInt(process.env.APIFY_CYCLE_START_DAY, 10) || DEFAULT_CYCLE_START_DAY;
+const TRAILING_NIGHTS = 3;
+
+/**
+ * Where the cycle stands. Apify's own figures first; if that call fails, the cycle from
+ * APIFY_CYCLE_START_DAY and rana_v3_runs inside it. Also the trailing actual cost of the
+ * last few runs, so the projection prices a typical night, not every call at its cap.
+ */
+export async function cycleSpend(now = new Date(), { readCycle = () => readApifyCycle(apifyFetch), supabase = getClient() } = {}) {
+  const apify = await readCycle();
+  const bounds = apify ?? { ...cycleBounds(now, CYCLE_START_DAY), basis: 'rana_v3_runs' };
   const { data, error, status } = await supabase
     .from('rana_v3_runs')
-    .select('apify_cost_usd')
-    .gte('started_at', start.toISOString())
-    .eq('source', 'ad_library_apify');
+    .select('apify_cost_usd, started_at, status')
+    .gte('started_at', new Date(bounds.start.getTime() - 7 * 86_400_000).toISOString())
+    .eq('source', 'ad_library_apify')
+    .order('started_at', { ascending: false });
   // The run's first DB call — a rejected service key shows up here every night.
-  await noteProviderStatus('supabase', status, 'month-to-date spend query');
-  if (error) {
-    logger.warn({ err: error.message }, 'month-to-date spend query failed — assuming 0');
-    return 0;
-  }
-  return (data || []).reduce((s, r) => s + Number(r.apify_cost_usd || 0), 0);
+  await noteProviderStatus('supabase', status, 'cycle spend query');
+  if (error) logger.warn({ err: error.message }, 'cycle spend query failed');
+  const rows = data || [];
+  const inCycle = rows.filter(r => Date.parse(r.started_at) >= bounds.start.getTime());
+  const ranSum = inCycle.reduce((s, r) => s + Number(r.apify_cost_usd || 0), 0);
+  const recent = rows.filter(r => r.status === 'success').slice(0, TRAILING_NIGHTS);
+  return {
+    basis: bounds.basis,
+    start: bounds.start, end: bounds.end,
+    spent: apify ? apify.spent : (error ? 0 : ranSum),
+    limitUsd: apify?.limitUsd ?? null,
+    trailingNightUsd: recent.length ? recent.reduce((s, r) => s + Number(r.apify_cost_usd || 0), 0) / recent.length : null,
+  };
 }
 
 // Telegram first, WhatsApp copy, one alert_log row (lib/alert.js, msg-107 Fix 4).
@@ -349,25 +357,37 @@ export async function runSource(targets, runState) {
   const calls = planCalls(terms, soloTerms, { factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets) });
 
   // --- budget guard, BEFORE spending anything -------------------------------
-  const mtd = await monthToDateUsd();
-  const day = new Date().getUTCDate();
-  const daysInMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 0)).getUTCDate();
+  // On Apify's billing cycle (msg-124 #2a). month_to_date_usd / projected_month_usd keep
+  // their column names but now hold cycle-to-date and projected cycle-end.
+  const now = new Date();
+  const cyc = await cycleSpend(now, { supabase });
+  const budgetUsd = cyc.limitUsd != null ? Math.min(MONTHLY_BUDGET_USD, cyc.limitUsd) : MONTHLY_BUDGET_USD;
   const estimateThisRun = estimateRunUsd(calls);
-  const projected = projectMonthUsd({ mtd, nightUsd: estimateThisRun });
-  m.month_to_date_usd = Number(mtd.toFixed(4));
-  m.projected_month_usd = Number(projected.toFixed(4));
+  const nightsLeft = nightsLeftInCycle(now, cyc.end);
+  const b = budgetCheck({ spent: cyc.spent, tonightUsd: estimateThisRun, nightUsd: cyc.trailingNightUsd, nightsLeft, budgetUsd, alertUsd: BUDGET_ALERT_USD });
+  m.month_to_date_usd = Number(cyc.spent.toFixed(4));
+  m.projected_month_usd = Number(b.projected.toFixed(4));
+  m.budget = {
+    basis: cyc.basis, cycle_start: cyc.start.toISOString(), cycle_end: cyc.end.toISOString(),
+    spent_usd: Number(cyc.spent.toFixed(4)), nights_left: nightsLeft,
+    tonight_worst_usd: Number(estimateThisRun.toFixed(4)),
+    trailing_night_usd: cyc.trailingNightUsd == null ? null : Number(cyc.trailingNightUsd.toFixed(4)),
+    budget_usd: budgetUsd, alert_usd: BUDGET_ALERT_USD,
+  };
+  const cycleLabel = `cycle ${cyc.start.toISOString().slice(0, 10)} → ${cyc.end.toISOString().slice(0, 10)} (${cyc.basis})`;
 
-  if (mtd + estimateThisRun > MONTHLY_BUDGET_USD) {
+  if (b.halt) {
     m.status = 'halted';
-    m.halt_reason = `month-to-date $${mtd.toFixed(4)} + this run ~$${estimateThisRun.toFixed(4)} would exceed APIFY_MONTHLY_BUDGET_USD $${MONTHLY_BUDGET_USD}`;
-    logger.error({ mtd, estimateThisRun, MONTHLY_BUDGET_USD }, 'apify budget exceeded — refusing to run');
+    m.halt_reason = `cycle-to-date $${cyc.spent.toFixed(4)} + this run ~$${estimateThisRun.toFixed(4)} would exceed the $${budgetUsd} budget — ${cycleLabel}`;
+    m.metadata = { budget: m.budget };
+    logger.error({ budget: m.budget }, 'apify budget exceeded — refusing to run');
     await page('rana-v3 apify budget exceeded — run HALTED', m.halt_reason);
     await persist(supabase, m);
     return toResult(m);
   }
-  if (projected > BUDGET_ALERT_USD) {
+  if (b.alert) {
     await page('rana-v3 apify spend on track to exceed budget',
-      `projected $${projected.toFixed(2)}/month vs alert threshold $${BUDGET_ALERT_USD} (free tier $${MONTHLY_BUDGET_USD}). month-to-date $${mtd.toFixed(4)} on day ${day}/${daysInMonth}. Run proceeding.`);
+      `projected $${b.projected.toFixed(2)} by cycle end vs alert threshold $${BUDGET_ALERT_USD} (limit $${budgetUsd}). spent $${cyc.spent.toFixed(4)}, ${nightsLeft} night(s) left at ~$${(cyc.trailingNightUsd ?? estimateThisRun).toFixed(3)} — ${cycleLabel}. Run proceeding.`);
   }
 
   // --- fetch ----------------------------------------------------------------
@@ -641,6 +661,8 @@ async function persist(supabase, m) {
     delete row.insert_failed;
     delete row.write_errors;
     delete row.write_failures;
+    delete row.budget;   // carried in metadata.budget (msg-124 #2a)
+    row.metadata = { ...(row.metadata || {}), budget: m.budget ?? null };
     const { error } = await supabase.from('rana_v3_runs').insert([row]);
     if (error) logger.error({ err: error.message }, 'rana_v3_runs insert failed');
   } catch (e) {

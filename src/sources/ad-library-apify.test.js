@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, projectMonthUsd, termsFor, perCallStats, classifyWriteError, reportWriteFailures } from './ad-library-apify.js';
+import { extractPhones, memoryForUrls, soloTermsTonight, soloAdsAllowance, planCalls, estimateRunUsd, termsFor, perCallStats, classifyWriteError, reportWriteFailures, cycleSpend } from './ad-library-apify.js';
 
 // ── msg-116 #1: a new lead that did not land is counted and pages ─────────────────
 // 10-01..10-04: 7 inserts failed, logged once each, counted by nothing; every run
@@ -142,24 +142,36 @@ test('BUDGET: a night is priced at every call\'s cap + 3 overshoot, per call', (
   assert.ok(Math.abs(estimateRunUsd(night) - (ads * 0.00075 + 5 * 0.00005)) < 1e-9);
 });
 
-test('BUDGET: nights are symmetric, so tonight prices the month', () => {
+test('BUDGET: nights are symmetric, so tonight prices the cycle', () => {
   for (let d = 1; d < 31; d++) assert.ok(Math.abs(estimateRunUsd(planFor(oct(d))) - estimateRunUsd(planFor(oct(d + 1)))) < 1e-12, `oct ${d}`);
-  const p = projectMonthUsd({ mtd: 0.5, now: oct(4), nightUsd: 0.1 });
-  assert.ok(Math.abs(p - (0.5 + 28 * 0.1)) < 1e-9, 'tonight included: Oct 4..31 = 28 nights');
 });
 
-test('BUDGET: a full October of the new plan, worst case, stays under the $5 halt', () => {
-  const p = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1))) });
+const fakeRuns = (rows) => ({ from: () => ({ select: () => ({ gte: () => ({ eq: () => ({ order: async () => ({ data: rows, error: null, status: 200 }) }) }) }) }) });
+const RUNS = [
+  { started_at: '2026-10-08T02:00:00Z', apify_cost_usd: '0.10', status: 'success' },
+  { started_at: '2026-10-07T02:00:00Z', apify_cost_usd: '0.12', status: 'success' },
+  { started_at: '2026-10-06T02:00:00Z', apify_cost_usd: '0.08', status: 'success' },
+  { started_at: '2026-10-05T02:00:00Z', apify_cost_usd: '0.50', status: 'success' },
+  { started_at: '2026-09-17T02:00:00Z', apify_cost_usd: '9.00', status: 'success' },   // previous cycle
+];
+
+test('INTENT: the guard counts Apify\'s cycle — Apify\'s own figure when it answers', async () => {
+  const c = await cycleSpend(new Date('2026-10-09T02:00:00Z'), { supabase: fakeRuns(RUNS),
+    readCycle: async () => ({ start: new Date('2026-09-18T00:00:00Z'), end: new Date('2026-10-17T23:59:59.999Z'), spent: 1.74, limitUsd: 5, basis: 'apify_limits' }) });
+  assert.deepEqual([c.basis, c.spent, c.limitUsd], ['apify_limits', 1.74, 5]);
+  assert.ok(Math.abs(c.trailingNightUsd - 0.10) < 1e-9, 'trailing = mean of the last 3 successful runs');
+});
+
+test('INTENT: if Apify does not answer, the cycle comes from the 18th and rana_v3_runs inside it — never the calendar month', async () => {
+  const c = await cycleSpend(new Date('2026-10-09T02:00:00Z'), { supabase: fakeRuns(RUNS), readCycle: async () => null });
+  assert.equal(c.basis, 'rana_v3_runs');
+  assert.equal(c.start.toISOString(), '2026-09-18T00:00:00.000Z');
+  assert.ok(Math.abs(c.spent - 0.80) < 1e-9, 'the 09-17 run belongs to the previous cycle');
+});
+
+test('BUDGET: a full 31-night cycle of the plan, worst case, stays under the $5 limit', () => {
+  const p = 31 * estimateRunUsd(planFor(oct(1)));
   assert.ok(p < 5, `projected $${p.toFixed(2)}`);
-});
-
-test('BUDGET: the default allowance (36, Yousif 2026-10-03) keeps a full 31-day month under the $4 alert — no nightly page', () => {
-  assert.equal(targetsJson.factory_solo_ads, 36);
-  const p = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1))) });
-  assert.ok(p < 4, `projected $${p.toFixed(2)} — over the $4 alert`);
-  // 60 was the first proposal: its worst case ($4.54 code, ~$5.13 real billing) runs into Apify's $5 hard limit.
-  const at60 = projectMonthUsd({ mtd: 0, now: oct(1), nightUsd: estimateRunUsd(planFor(oct(1), { APIFY_FACTORY_SOLO_ADS: '60' })) });
-  assert.ok(at60 > 4);
 });
 import { isHardBlocked } from '../scoring/dimensions.js';
 
