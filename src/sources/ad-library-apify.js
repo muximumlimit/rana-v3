@@ -119,6 +119,14 @@ export function planCalls(terms, soloTerms = [], { factory = [], soloAds = ADS_P
   return calls;
 }
 
+/** Tonight's calls for `terms`, with every allowance and switch read from targets + env. */
+export function buildPlan(targets, terms, env = process.env) {
+  return planCalls(terms, soloTermsTonight(targets, terms, new Date(), env), {
+    factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets, env),
+    termAds: termAdsAllowance(targets, env), batch: env.APIFY_BATCH_TERMS === 'true',
+  });
+}
+
 const callUsd = (c) => ((c.ads ?? ADS_PER_CALL) + ADS_OVERSHOOT) * USD_PER_AD + USD_PER_START;
 // Worst case for one night: every call returns its cap plus the overshoot.
 export const estimateRunUsd = (calls) => calls.reduce((s, c) => s + callUsd(c), 0);
@@ -367,10 +375,7 @@ export async function runSource(targets, runState) {
   m.write_failures = [];
 
   const soloTerms = soloTermsTonight(targets, terms);
-  const calls = planCalls(terms, soloTerms, {
-    factory: targets.factory_terms || [], soloAds: soloAdsAllowance(targets),
-    termAds: termAdsAllowance(targets), batch: process.env.APIFY_BATCH_TERMS === 'true',
-  });
+  const calls = buildPlan(targets, terms);
 
   // --- budget guard, BEFORE spending anything -------------------------------
   // On Apify's billing cycle (msg-124 #2a). month_to_date_usd / projected_month_usd keep

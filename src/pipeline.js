@@ -1,7 +1,7 @@
 import { createReadStream } from 'fs';
 import { readFile } from 'fs/promises';
 import { runSource as runMetaAdLibrary } from './sources/meta-ad-library.js';
-import { runSource as runAdLibraryApify } from './sources/ad-library-apify.js';
+import { runSource as runAdLibraryApify, buildPlan, estimateRunUsd } from './sources/ad-library-apify.js';
 import logger from './util/logger.js';
 
 // In-memory run tracking
@@ -46,6 +46,22 @@ export function tonightsTerms(targets, perNight, day = epochDay()) {
   ];
 }
 
+// The plan invariant (msg-125, Yousif 2026-10-08): the WORST-CASE night (every call at
+// its cap + overshoot) × the longest Apify cycle (31 nights) stays under the $4 alert, so
+// the alert stays an alert and the $5 hard limit is never in reach. Enforced here, not
+// only in config: TERMS_PER_NIGHT (15 in production) can ask for more than fits, and
+// the night is then cut to the largest size that does — the rotation still covers every
+// term, it just takes more nights.
+export const MAX_CYCLE_NIGHTS = 31;
+export function sizeTermsPerNight(targets, requested, { env = process.env, day = epochDay() } = {}) {
+  const alertUsd = parseFloat(env.APIFY_BUDGET_ALERT_USD || '4');
+  for (let n = requested; n >= 1; n--) {
+    const worst = estimateRunUsd(buildPlan(targets, tonightsTerms(targets, n, day), env));
+    if (worst * MAX_CYCLE_NIGHTS < alertUsd) return n;
+  }
+  return 1;
+}
+
 export async function startRun() {
   const runId = `run_${Date.now()}`;
   const runState = {
@@ -86,7 +102,11 @@ async function executePipeline(runId, runState) {
     const targets = await loadTargets();
 
     // Batch a rotating subset per night (env-tunable, no deploy needed to retune).
-    const perNight = parseInt(process.env.TERMS_PER_NIGHT, 10) || targets.terms_per_night || 15;
+    const requested = parseInt(process.env.TERMS_PER_NIGHT, 10) || targets.terms_per_night || 15;
+    const isApify = (process.env.AD_LIBRARY_SOURCE || 'firecrawl').toLowerCase() === 'apify';
+    const perNight = isApify ? sizeTermsPerNight(targets, requested) : requested;
+    if (perNight < requested) logger.info({ runId, requested, perNight }, 'terms per night cut to fit the plan invariant (worst night x 31 < alert)');
+    runState.terms_requested = requested;
     const search_terms = tonightsTerms(targets, perNight);
     const termsTotal = targets.search_terms.length + (targets.factory_terms || []).length;
     runState.terms_run = search_terms.length;

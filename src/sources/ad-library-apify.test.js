@@ -31,21 +31,43 @@ test('a clean run pages nothing', async () => {
   await reportWriteFailures({ insert_failed: 0, write_errors: 0, enrich_not_landed: 0, write_failures: [] }, async (s) => { pages.push(s); });
   assert.equal(pages.length, 0);
 });
-import { tonightsTerms } from '../pipeline.js';
+import { tonightsTerms, sizeTermsPerNight, MAX_CYCLE_NIGHTS } from '../pipeline.js';
 import targetsJson from '../../config/targets.json' with { type: 'json' };
 
 // ---------------------------------------------------------------------------
-// call plan (Yousif 2026-10-03, rebuilt msg-124 #2b/c/d 2026-10-08)
+// call plan (Yousif 2026-10-03, rebuilt msg-124 #2b/c/d, resized msg-125 2026-10-08)
 // ---------------------------------------------------------------------------
 const oct = (d) => new Date(`2026-10-${String(d).padStart(2, '0')}T02:00:00Z`);
 const epochDay = (d) => Math.floor(d.getTime() / 86_400_000);
+// As production runs it: TERMS_PER_NIGHT=15 asked for, cut by the invariant.
+const PROD_ASK = 15;
 const planFor = (date, env = {}) => {
-  const terms = tonightsTerms(targetsJson, 15, epochDay(date));
+  const n = sizeTermsPerNight(targetsJson, PROD_ASK, { env, day: epochDay(date) });
+  const terms = tonightsTerms(targetsJson, n, epochDay(date));
   return planCalls(terms, soloTermsTonight(targetsJson, terms, date, env), {
     factory: targetsJson.factory_terms, soloAds: soloAdsAllowance(targetsJson, env),
     termAds: termAdsAllowance(targetsJson, env), batch: env.APIFY_BATCH_TERMS === 'true',
   });
 };
+
+test('INTENT (msg-125): worst-case night x 31 nights stays under the $4 alert, every night', () => {
+  assert.equal(MAX_CYCLE_NIGHTS, 31);
+  for (let d = 1; d <= 31; d++) {
+    const worst = estimateRunUsd(planFor(oct(d)));
+    assert.ok(worst * 31 < 4, `oct ${d}: $${worst.toFixed(4)} x 31 = $${(worst * 31).toFixed(2)}`);
+  }
+});
+
+test('INTENT (msg-125): the invariant holds whatever TERMS_PER_NIGHT asks for, and is cut no deeper than needed', () => {
+  for (const ask of [9, 15, 40]) assert.equal(sizeTermsPerNight(targetsJson, ask, { env: {}, day: 20734 }), 9, `ask ${ask}`);
+  assert.equal(sizeTermsPerNight(targetsJson, 5, { env: {}, day: 20734 }), 5, 'a smaller ask is left alone');
+  // a bigger allowance shrinks the night instead of breaking the invariant
+  const n30 = sizeTermsPerNight(targetsJson, 15, { env: { APIFY_TERM_ADS: '30' }, day: 20734 });
+  assert.ok(n30 < 9);
+  const terms = tonightsTerms(targetsJson, n30, 20734);
+  const calls = planCalls(terms, soloTermsTonight(targetsJson, terms, oct(9), {}), { factory: targetsJson.factory_terms, soloAds: 36, termAds: 30 });
+  assert.ok(estimateRunUsd(calls) * 31 < 4);
+});
 const ALL = [...targetsJson.factory_terms, ...targetsJson.search_terms];
 
 test('INTENT (msg-124 #2b): the dead and empty terms are gone', () => {
@@ -64,17 +86,17 @@ test('INTENT (msg-124 #2d): the 4 uncovered ICP sectors each have terms — all 
   };
   for (const [s, terms] of Object.entries(sectors)) for (const t of terms) assert.ok(targetsJson.search_terms.includes(t), `${s}: ${t} missing`);
   assert.equal(new Set(ALL).size, ALL.length, 'no term listed twice');
+  // the 4 thin factory terms run in the general rotation at term_ads (msg-125)
+  for (const t of ['مصنع اثاث بغداد', 'معمل بلاستيك بغداد', 'معمل حلويات بغداد', 'ورشة تصنيع بغداد']) assert.ok(targetsJson.search_terms.includes(t), t);
 });
 
 test('INTENT (msg-124 #2c): every term gets its own call — nothing is crowded out of a shared cap', () => {
   for (let d = 1; d <= 31; d++) {
     const calls = planFor(oct(d));
-    assert.equal(calls.length, 15, `oct ${d}`);
+    assert.equal(calls.length, 9, `oct ${d}: 1 solo + 8`);
     assert.ok(calls.every(c => c.terms.length === 1), `oct ${d}: a call carries more than one term`);
-    assert.equal(new Set(calls.flatMap(c => c.terms)).size, 15, 'every term runs exactly once');
-    const solo = calls.filter(c => c.solo);
-    assert.equal(solo.length, 1, `oct ${d}: exactly one solo factory term`);
-    assert.equal(calls.filter(c => targetsJson.factory_terms.includes(c.terms[0])).length, 3, 'factory slots');
+    assert.equal(new Set(calls.flatMap(c => c.terms)).size, 9, 'every term runs exactly once');
+    assert.equal(calls.filter(c => c.solo).length, 1, `oct ${d}: exactly one solo factory term`);
   }
 });
 
@@ -99,7 +121,8 @@ test('INTENT: APIFY_BATCH_TERMS=true restores the 4-term batches at 30 exactly',
   const calls = planFor(oct(2), { APIFY_BATCH_TERMS: 'true' });
   const [solo, ...rest] = calls;
   assert.equal(solo.solo, true);
-  assert.deepEqual(rest.map(c => [c.terms.length, c.ads]), [[2, 30], [4, 30], [4, 30], [4, 30]]);
+  assert.ok(rest.every(c => c.terms.length <= 4 && c.ads === 30));
+  assert.ok(rest.some(c => c.terms.length === 4));
 });
 
 test('allowance: env overrides config; solo never below the batch cap; term_ads bounded 5..100', () => {
@@ -107,7 +130,7 @@ test('allowance: env overrides config; solo never below the batch cap; term_ads 
   assert.equal(soloAdsAllowance(targetsJson, { APIFY_FACTORY_SOLO_ADS: '75' }), 75);
   assert.equal(soloAdsAllowance(targetsJson, { APIFY_FACTORY_SOLO_ADS: '10' }), 30);
   assert.equal(soloAdsAllowance({}, {}), 30);
-  assert.equal(termAdsAllowance(targetsJson, {}), 15);
+  assert.equal(termAdsAllowance(targetsJson, {}), 12);
   assert.equal(termAdsAllowance(targetsJson, { APIFY_TERM_ADS: '25' }), 25);
   assert.equal(termAdsAllowance(targetsJson, { APIFY_TERM_ADS: '1' }), 5);
   assert.equal(termAdsAllowance({}, {}), 30);
@@ -155,8 +178,8 @@ test('INTENT: hit_cap is measured against the call\'s OWN allowance — 30 ads o
 
 test('BUDGET: a night is priced at every call\'s cap + 3 overshoot, per call', () => {
   const night = planFor(oct(2));
-  const ads = 1 * (targetsJson.factory_solo_ads + 3) + 14 * (targetsJson.term_ads + 3);
-  assert.ok(Math.abs(estimateRunUsd(night) - (ads * 0.00075 + 15 * 0.00005)) < 1e-9);
+  const ads = 1 * (targetsJson.factory_solo_ads + 3) + 8 * (targetsJson.term_ads + 3);
+  assert.ok(Math.abs(estimateRunUsd(night) - (ads * 0.00075 + 9 * 0.00005)) < 1e-9);
 });
 
 test('BUDGET: nights are symmetric, so tonight prices the cycle', () => {
@@ -186,9 +209,8 @@ test('INTENT: if Apify does not answer, the cycle comes from the 18th and rana_v
   assert.ok(Math.abs(c.spent - 0.80) < 1e-9, 'the 09-17 run belongs to the previous cycle');
 });
 
-// msg-124: worst case must fit the headroom left before Apify's 10-17 reset ($3.26 / 9
-// nights = $0.36); a TYPICAL night must fit $0.16 (the $5 cycle / 30). Worst case after
-// the reset does not fit $0.16 — the cycle guard halts on that, it never overspends.
+// msg-125: the governing rule is the invariant test above (worst x 31 < $4). This one
+// keeps the pre-reset headroom check: $3.26 left / 9 nights to 10-17 = $0.36.
 test('BUDGET: worst-case night fits the pre-reset headroom ($0.36)', () => {
   for (let d = 1; d <= 31; d++) assert.ok(estimateRunUsd(planFor(oct(d))) <= 0.36, `oct ${d}: $${estimateRunUsd(planFor(oct(d))).toFixed(3)}`);
 });
